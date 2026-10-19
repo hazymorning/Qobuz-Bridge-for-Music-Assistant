@@ -591,11 +591,11 @@ async def login_and_create_token(
 
 async def validate_token(
     url: str, token: str, *, session: Optional[aiohttp.ClientSession] = None
-) -> str:
+) -> tuple[str, str]:
     """Check a pasted long-lived token by connecting once.
 
     Returns:
-        The MA server version.
+        (MA server version, the token's user name or "")
 
     Raises:
         MALoginError: with a plain-language message.
@@ -607,7 +607,14 @@ async def validate_token(
     try:
         await asyncio.wait_for(client.connect(), 15)
         server_info = getattr(client, "server_info", None)
-        return str(getattr(server_info, "server_version", "") or "")
+        version = str(getattr(server_info, "server_version", "") or "")
+        name = ""
+        try:
+            user = await client.auth.get_current_user()
+            name = str(getattr(user, "display_name", "") or getattr(user, "username", "") or "")
+        except Exception as e:
+            logger.debug(f"Could not look up the token's Music Assistant user: {e}")
+        return version, name
     except (AuthenticationFailed, AuthenticationRequired, InvalidToken):
         raise MALoginError("Music Assistant did not accept that token.") from None
     except InvalidServerVersion as e:

@@ -188,13 +188,14 @@ class MusicAssistantManager:
 
         try:
             if token.strip():
-                await validate_token(url, token.strip())
-                new_token, display_name = token.strip(), username.strip()
+                _version, token_user = await validate_token(url, token.strip())
+                new_token, display_name = token.strip(), username.strip() or token_user
             else:
                 if not username.strip() or not password:
                     return {
                         "ok": False,
-                        "error": "Enter your Music Assistant username and password.",
+                        "error": "Enter your Music Assistant username and password "
+                        "(or a long-lived token).",
                     }
                 new_token, display_name = await login_and_create_token(
                     url, username.strip(), password

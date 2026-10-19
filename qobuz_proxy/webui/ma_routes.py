@@ -6,6 +6,7 @@ include the MA token.
 """
 
 import logging
+import time
 from typing import Any, Optional
 
 from aiohttp import web
@@ -128,10 +129,25 @@ def build_checks(auth_state: dict, status: dict) -> list[dict[str, str]]:
     return checks
 
 
+class _LanIpCache:
+    """The host's LAN address, looked up at most once a minute (the panel polls)."""
+
+    def __init__(self) -> None:
+        self._checked_at = 0.0
+        self._ip = ""
+
+    def get(self) -> str:
+        if not self._ip or time.monotonic() - self._checked_at > 60.0:
+            self._ip = direct_lan_ip()
+            self._checked_at = time.monotonic()
+        return self._ip
+
+
 def _status_payload(request: web.Request, manager: Any) -> dict[str, Any]:
     status: dict[str, Any] = manager.status()
     status["checks"] = build_checks(request.app.get("auth_state", {}), status)
-    ip = direct_lan_ip()
+    cache = request.app.get("ma_lan_ip")
+    ip = cache.get() if isinstance(cache, _LanIpCache) else direct_lan_ip()
     port = request.app.get("http_port", 8689)
     status["direct_login_url"] = f"http://{ip}:{port}" if ip else ""
     return status
@@ -207,6 +223,7 @@ async def _handle_players(request: web.Request) -> web.Response:
 
 def register_ma_routes(app: web.Application) -> None:
     """Register the Music Assistant API routes."""
+    app["ma_lan_ip"] = _LanIpCache()
     app.router.add_get("/api/ma/status", _handle_status)
     app.router.add_post("/api/ma/connect", _handle_connect)
     app.router.add_post("/api/ma/disconnect", _handle_disconnect)
