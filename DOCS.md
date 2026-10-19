@@ -6,7 +6,8 @@ Assistant to play that Qobuz track on that player. Music Assistant streams it wi
 provider and shows the track, artwork, queue and progress as usual.
 
 Control works both ways. Play, pause, next, previous, seek and volume in the Qobuz app go to Music
-Assistant. Pause, resume, next, stop, seek and volume in Music Assistant show up in the Qobuz app.
+Assistant. Pause, resume, next, seek and volume in Music Assistant show up in the Qobuz app; stop,
+previous or clearing the queue in Music Assistant show the device as stopped in the Qobuz app.
 
 ## Before you start
 
@@ -107,8 +108,23 @@ device again in the Qobuz app and press play.
 
 ## When the add-on restarts during playback
 
-The music keeps playing in Music Assistant. The Qobuz app loses the device for a moment. Pick the
-device again in the Qobuz app to take control again.
+The music keeps playing in Music Assistant, and the devices come back in the Qobuz app without
+logging in again. The Qobuz app may show the track as paused at an older position: pick the device
+again and press play. The add-on continues what Music Assistant is playing instead of restarting
+the track.
+
+## Repeat and autoplay in Music Assistant
+
+When you play from the Qobuz app, the add-on switches off repeat and autoplay ("Don't stop the
+music") for that player in Music Assistant, so the Qobuz queue decides what plays next and an album
+ends where it ends. Switch them on again in Music Assistant when you want them.
+
+## Speakers with built-in Qobuz Connect (WiiM)
+
+You can switch between the "(MA)" device and the speaker's own Qobuz Connect device in the Qobuz
+app, in both directions. If another app starts playing directly on the speaker (not through Music
+Assistant) while the "(MA)" device is active, Music Assistant does not report it; the add-on
+notices when the current track would have ended and then shows the device as stopped.
 
 ## Networking
 
@@ -159,8 +175,9 @@ rebuilds the add-on on your box. Your logins and settings are kept.
 - **The Qobuz login tab does not load.** Open `http://<home-assistant-ip>:8689` yourself, from a
   phone or computer on your home network. It does not work through Nabu Casa.
 - **The Music Assistant login is rejected.** See [Music Assistant login](#music-assistant-login).
-- **A track stops right away with an error.** Music Assistant could not play it with its Qobuz
-  account; see [Limitations](#limitations). The **Log** tab names the track.
+- **A track is skipped.** Either Qobuz reports it as unavailable for your account or country, or
+  Music Assistant could not play it with its Qobuz account; see [Limitations](#limitations). The
+  **Log** tab names the track.
 - **The add-on keeps restarting.** Another program may be using port 8689. Check the **Log** tab.
 - **Logs:** on the add-on's **Log** tab. For more detail, set `log_level` to `debug` on the
   **Configuration** tab and restart the add-on. Please include the log when you report a problem
@@ -169,8 +186,8 @@ rebuilds the add-on on your box. Your logins and settings are kept.
 ## Limitations
 
 - Music Assistant plays the music with its own Qobuz account. If that account cannot play a track
-  that your Qobuz app account can (a different subscription or country, for example), the track
-  stops with an error in the log.
+  that your Qobuz app account can (a different subscription or country, for example), the track is
+  skipped and the log says why.
 - Playback starts a few seconds after you press play, because Music Assistant fetches and buffers
   the stream first.
 - The audio quality is whatever Music Assistant's Qobuz provider and the player support. The
