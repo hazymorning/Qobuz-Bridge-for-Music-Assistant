@@ -12,6 +12,9 @@ First release.
   stop, seek and volume in Music Assistant show up in the Qobuz app.
 - When someone plays something else on the player in Music Assistant, the add-on lets go and the
   Qobuz app shows the device as stopped.
+- Reconnects on its own when Music Assistant restarts or was unreachable. After an add-on
+  restart the music keeps playing and the devices come back without logging in again.
+- A track that Qobuz or Music Assistant cannot play in your region is skipped.
 - Sidebar panel: Qobuz login, Music Assistant login (username and password, or a long-lived
   token), player selection and plain-language status checks.
 - Turns on "Show in sidebar" and the watchdog on its first start.
