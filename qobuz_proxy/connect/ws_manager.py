@@ -1,0 +1,769 @@
+"""
+WebSocket connection manager.
+
+Handles connection lifecycle, authentication, and message routing.
+"""
+
+import asyncio
+import logging
+import time
+import uuid
+from typing import Any, Awaitable, Callable, Dict, Optional
+
+import websockets
+from websockets import ClientConnection
+
+from qobuz_proxy.auth.tokens import WSToken
+from qobuz_proxy.config import DEVICE_TYPES, Config
+
+from .protocol import (
+    DecodedMessage,
+    JoinSessionReason,
+    MessageType,
+    ProtocolCodec,
+    QConnectMessageType,
+)
+from .types import ConnectTokens
+
+logger = logging.getLogger(__name__)
+
+# Connection constants
+PING_INTERVAL = 10.0  # seconds
+PONG_TIMEOUT = 30.0  # seconds
+RECV_TIMEOUT = 1.0  # seconds (for periodic checks)
+TOKEN_REFRESH_BUFFER = 60  # seconds before expiry
+TOKEN_REFRESH_IDLE_PERIOD = (
+    60.0  # seconds of quiet (no send, no command) before a refresh reconnect
+)
+INITIAL_RECONNECT_DELAY = 1.0  # seconds
+MAX_RECONNECT_DELAY = 60.0  # seconds
+RECONNECT_BACKOFF_MULTIPLIER = 2.0
+TOKEN_MINT_RETRY_DELAY = 30.0  # seconds between self-mint attempts
+
+# Message handler callback type
+MessageHandler = Callable[[int, Any], Optional[asyncio.Task[None]]]
+
+# Async callback that mints a fresh WS token (returns None on failure)
+TokenRefresher = Callable[[], Awaitable[Optional[WSToken]]]
+
+
+class TokenRefreshRequired(Exception):
+    """Raised when the WebSocket must wait for refreshed tokens from the app."""
+
+
+class WsManager:
+    """
+    Manages WebSocket connection to Qobuz servers.
+
+    Handles:
+    - Connection establishment and authentication
+    - Automatic reconnection with exponential backoff
+    - Message encoding/decoding via ProtocolCodec
+    - Routing incoming messages to registered handlers
+    """
+
+    def __init__(self, config: Config):
+        """
+        Initialize WebSocket manager.
+
+        Args:
+            config: Application configuration
+        """
+        self.config = config
+        self._device_uuid = self._uuid_to_bytes(config.device.uuid)
+        self._codec = ProtocolCodec(self._device_uuid)
+
+        # Connection state
+        self._ws: Optional[ClientConnection] = None
+        self._ws_token: Optional[WSToken] = None
+        self._session_uuid: Optional[bytes] = None
+        self._is_connected = False
+        self._should_run = False
+
+        # Session ownership is independent of PLAYING/PAUSED/STOPPED. Retain
+        # the server's last decision across transport reconnects, but require
+        # confirmation on the new connection before sending playback reports.
+        self._renderer_active = False
+        self._external_playback = False
+        self._active_confirmed = False
+        self._ownership_generation = 0
+        self._activation_request: Optional[object] = None
+
+        # Reconnection state
+        self._reconnect_delay = INITIAL_RECONNECT_DELAY
+
+        # Token refresh state
+        self._token_update_event = asyncio.Event()
+        self._token_version = 0
+        self._token_refresher: Optional[TokenRefresher] = None
+
+        # Message handlers: message_type -> handler
+        self._handlers: Dict[int, MessageHandler] = {}
+
+        # Serializes encode+send so msgIds hit the wire in increasing order
+        self._send_lock = asyncio.Lock()
+        self._last_activity_time = time.monotonic()
+        self._refresh_deferred = False
+
+        # Tasks
+        self._receive_task: Optional[asyncio.Task[None]] = None
+
+        # Callbacks
+        self._on_connected: Optional[Callable[[], None]] = None
+        self._on_disconnected: Optional[Callable[[], None]] = None
+
+        # Quality setting for join session message
+        self._max_audio_quality: int = 27  # Default to Hi-Res 192k
+
+    def set_tokens(self, tokens: ConnectTokens, *, activate: bool = False) -> None:
+        """
+        Set connection tokens from discovery service.
+
+        Args:
+            tokens: Tokens received from Qobuz app
+            activate: An explicit discovery connect request selected this speaker.
+                Token maintenance alone must not request activation.
+        """
+        previous_token = self._ws_token
+        previous_session_uuid = self._session_uuid
+        if activate:
+            self._external_playback = False
+
+        if tokens.ws_token:
+            self._ws_token = WSToken.from_connect_token(
+                jwt=tokens.ws_token.jwt,
+                exp=tokens.ws_token.exp,
+                endpoint=tokens.ws_token.endpoint,
+            )
+        self._session_uuid = self._uuid_to_bytes(tokens.session_id)
+        if previous_session_uuid != self._session_uuid:
+            self._renderer_active = False
+            self._activation_request = None
+        self._token_version += 1
+        self._token_update_event.set()
+
+        if self._ws_token:
+            logger.debug(f"Tokens set, endpoint: {self._ws_token.endpoint[:50]}...")
+
+        tokens_changed = (
+            previous_token != self._ws_token or previous_session_uuid != self._session_uuid
+        )
+        reconnect = tokens_changed or (activate and not self._renderer_active)
+        if activate and (reconnect or not self._is_connected):
+            self._activation_request = object()
+        if reconnect and self._ws and self._should_run:
+            self._invalidate_connection()
+            logger.info(
+                "[%s] Reconnecting after app request (activate=%s)",
+                self.config.device.name,
+                activate,
+            )
+            asyncio.create_task(self._close_for_token_refresh())
+
+    def set_token_refresher(self, refresher: TokenRefresher) -> None:
+        """
+        Register a callback that mints a fresh WS token via the Qobuz API.
+
+        With a refresher set, an expiring token triggers a self-refresh and a
+        quick reconnect instead of leaving the device offline until the Qobuz
+        app reconnects and pushes new tokens.
+
+        Args:
+            refresher: Async callable returning a WSToken, or None on failure
+        """
+        self._token_refresher = refresher
+
+    def set_max_audio_quality(self, quality: int) -> None:
+        """
+        Set max audio quality for join session message.
+
+        Args:
+            quality: Quality ID (5=MP3, 6=CD, 7=Hi-Res 96k, 27=Hi-Res 192k)
+        """
+        self._max_audio_quality = quality
+
+    def on_connected(self, callback: Callable[[], None]) -> None:
+        """Register callback for successful connection."""
+        self._on_connected = callback
+
+    def on_disconnected(self, callback: Callable[[], None]) -> None:
+        """Register callback for disconnection."""
+        self._on_disconnected = callback
+
+    def register_handler(self, message_type: int, handler: MessageHandler) -> None:
+        """
+        Register a handler for a specific QConnect message type.
+
+        Args:
+            message_type: QConnectMessage type code (e.g., 41 for SET_STATE)
+            handler: Callback function(message_type, message_data)
+        """
+        self._handlers[message_type] = handler
+        logger.debug(f"Registered handler for message type {message_type}")
+
+    async def start(self) -> None:
+        """Start WebSocket connection loop."""
+        if self._should_run or self._external_playback:
+            return
+
+        # A source takeover cancels the old connection. Finish its socket
+        # cleanup before opening a new one, including when the app immediately
+        # reselects this renderer with the same tokens.
+        if self._receive_task:
+            await asyncio.gather(self._receive_task, return_exceptions=True)
+
+        if not self._ws_token or not self._ws_token.is_valid():
+            logger.error("Cannot start WsManager: no valid tokens")
+            return
+
+        self._should_run = True
+        self._receive_task = asyncio.create_task(self._connection_loop())
+        logger.info("WebSocket manager started")
+
+    async def stop(self) -> None:
+        """Stop WebSocket connection."""
+        self._should_run = False
+        self._invalidate_connection()
+        self._activation_request = None
+        if self._ws:
+            await self._ws.close()
+        if self._receive_task:
+            self._receive_task.cancel()
+            try:
+                await self._receive_task
+            except asyncio.CancelledError:
+                pass
+        logger.info("WebSocket manager stopped")
+
+    @property
+    def is_connected(self) -> bool:
+        """Check if currently connected."""
+        return self._is_connected
+
+    @property
+    def is_renderer_active(self) -> bool:
+        """Whether this connection has confirmed ownership of playback."""
+        return self._is_connected and self._active_confirmed and self._renderer_active
+
+    def release_external_playback(self) -> None:
+        """Leave the cloud session so the app can select this renderer afresh."""
+        self._external_playback = True
+        self._renderer_active = False
+        self._activation_request = None
+        self._should_run = False
+        self._invalidate_connection()
+        # Closing the real connection removes this renderer from the cloud
+        # session. Keeping it connected while ignoring commands leaves a dead
+        # output in the app, which then skips the discovery handshake on retry.
+        # The connection's async context manager closes its socket on cancel.
+        if self._receive_task:
+            self._receive_task.cancel()
+        logger.info(
+            "[%s] Left Qobuz session after external source takeover", self.config.device.name
+        )
+
+    def _invalidate_connection(self) -> None:
+        self._is_connected = False
+        self._active_confirmed = False
+        self._ownership_generation += 1
+        if self._on_disconnected:
+            self._on_disconnected()
+
+    async def send_message(self, data: bytes) -> bool:
+        """
+        Send a pre-encoded message.
+
+        Args:
+            data: Encoded frame bytes
+
+        Returns:
+            True if sent, False if dropped (not connected)
+        """
+        return await self._encode_and_send(lambda: data)
+
+    async def _encode_and_send(
+        self, encode: Callable[[], bytes], *, allowed: Optional[Callable[[], bool]] = None
+    ) -> bool:
+        """
+        Encode and transmit a message atomically.
+
+        The codec stamps a monotonically increasing msgId at encode time and
+        the server kills connections whose msgIds arrive out of order or with
+        large gaps (error 1003 "Message gap too large"), so encoding and
+        transmission must happen under the same lock. Messages produced while
+        disconnected are dropped rather than queued: everything we send is
+        ephemeral current state that is re-announced after reconnecting, and
+        replaying stale frames with old msgIds gets the new connection killed.
+
+        Returns:
+            True if sent, False if dropped (not connected) or send failed
+        """
+        async with self._send_lock:
+            if not (self._ws and self._is_connected):
+                return False
+            if allowed is not None and not allowed():
+                return False
+            try:
+                await self._ws.send(encode())
+                self._last_activity_time = time.monotonic()
+                return True
+            except Exception as e:
+                logger.error(f"Failed to send message: {e}")
+                return False
+
+    async def send_state_update(
+        self,
+        playing_state: int,
+        buffer_state: int,
+        position_ms: int,
+        duration_ms: int,
+        queue_item_id: int,
+        queue_version_major: int,
+        queue_version_minor: int,
+        position_timestamp_ms: Optional[int] = None,
+    ) -> bool:
+        """
+        Send renderer state update.
+
+        Returns:
+            True if sent successfully
+        """
+        generation = self._ownership_generation
+        return await self._encode_and_send(
+            lambda: self._codec.encode_state_update(
+                playing_state=playing_state,
+                buffer_state=buffer_state,
+                position_ms=position_ms,
+                duration_ms=duration_ms,
+                queue_item_id=queue_item_id,
+                queue_version_major=queue_version_major,
+                queue_version_minor=queue_version_minor,
+                position_timestamp_ms=position_timestamp_ms,
+            ),
+            allowed=lambda: self.is_renderer_active and generation == self._ownership_generation,
+        )
+
+    async def send_volume_changed(self, volume: int) -> bool:
+        """
+        Send volume changed notification.
+
+        Args:
+            volume: Volume level 0-100
+
+        Returns:
+            True if sent successfully
+        """
+        return await self._encode_and_send(lambda: self._codec.encode_volume_changed(volume))
+
+    async def request_next_track(self, still_needed: Callable[[], bool]) -> bool:
+        """Advance the server queue only while the originating playback intent is valid."""
+        generation = self._ownership_generation
+        return await self._encode_and_send(
+            self._codec.encode_next_track,
+            allowed=lambda: (
+                self.is_renderer_active
+                and generation == self._ownership_generation
+                and still_needed()
+            ),
+        )
+
+    async def send_file_audio_quality_changed(
+        self,
+        quality: int,
+        sampling_rate: int = 0,
+        bit_depth: int = 0,
+        nb_channels: int = 0,
+    ) -> bool:
+        """
+        Send file audio quality changed notification.
+
+        Args:
+            quality: Quality ID (5=MP3, 6=CD, 7=Hi-Res 96k, 27=Hi-Res 192k)
+            sampling_rate: Sample rate in Hz (e.g. 44100, 96000). 0 = derive from quality.
+            bit_depth: Bit depth (16 or 24). 0 = derive from quality.
+            nb_channels: Number of channels. 0 = derive from quality.
+
+        Returns:
+            True if sent successfully
+        """
+        from qobuz_proxy.connect.protocol import QUALITY_TO_PROTOCOL
+
+        proto_quality = QUALITY_TO_PROTOCOL.get(quality, 4)
+        logger.debug(
+            f"Sending FILE_AUDIO_QUALITY_CHANGED: qobuz={quality} -> proto={proto_quality}, "
+            f"sr={sampling_rate}, bd={bit_depth}, ch={nb_channels}"
+        )
+        return await self._encode_and_send(
+            lambda: self._codec.encode_file_audio_quality_changed(
+                quality,
+                sampling_rate=sampling_rate,
+                bit_depth=bit_depth,
+                nb_channels=nb_channels,
+            )
+        )
+
+    async def send_device_audio_quality_changed(
+        self,
+        quality: int,
+        sampling_rate: int = 0,
+        bit_depth: int = 0,
+        nb_channels: int = 0,
+    ) -> bool:
+        """
+        Send device audio quality changed notification.
+
+        Args:
+            quality: Quality ID (5=MP3, 6=CD, 7=Hi-Res 96k, 27=Hi-Res 192k)
+            sampling_rate: Max sample rate in Hz. 0 = derive from quality.
+            bit_depth: Max bit depth. 0 = derive from quality.
+            nb_channels: Number of channels. 0 = derive from quality.
+
+        Returns:
+            True if sent successfully
+        """
+        from qobuz_proxy.connect.protocol import QUALITY_TO_PROTOCOL
+
+        proto_quality = QUALITY_TO_PROTOCOL.get(quality, 4)
+        logger.debug(
+            f"Sending DEVICE_AUDIO_QUALITY_CHANGED: qobuz={quality} -> proto={proto_quality}, "
+            f"sr={sampling_rate}, bd={bit_depth}, ch={nb_channels}"
+        )
+        return await self._encode_and_send(
+            lambda: self._codec.encode_device_audio_quality_changed(
+                quality,
+                sampling_rate=sampling_rate,
+                bit_depth=bit_depth,
+                nb_channels=nb_channels,
+            )
+        )
+
+    async def send_max_audio_quality_changed(self, quality: int, network_type: int = 1) -> bool:
+        """
+        Send max audio quality changed notification.
+
+        Args:
+            quality: Quality ID (5=MP3, 6=CD, 7=Hi-Res 96k, 27=Hi-Res 192k)
+            network_type: Network type (1=WiFi)
+
+        Returns:
+            True if sent successfully
+        """
+        from qobuz_proxy.connect.protocol import QUALITY_TO_PROTOCOL
+
+        proto_quality = QUALITY_TO_PROTOCOL.get(quality, 4)
+        logger.debug(f"Sending MAX_AUDIO_QUALITY_CHANGED: qobuz={quality} -> proto={proto_quality}")
+        return await self._encode_and_send(
+            lambda: self._codec.encode_max_audio_quality_changed(quality, network_type=network_type)
+        )
+
+    # -------------------------------------------------------------------------
+    # Connection Loop
+    # -------------------------------------------------------------------------
+
+    async def _connection_loop(self) -> None:
+        """Main connection loop with reconnection logic."""
+        while self._should_run:
+            should_backoff = True
+            try:
+                await self._connect_and_run()
+            except TokenRefreshRequired:
+                should_backoff = False
+            except Exception as e:
+                logger.error(f"Connection error: {e}")
+
+            if not self._should_run:
+                break
+
+            if not should_backoff:
+                continue
+
+            # Exponential backoff
+            logger.info(f"Reconnecting in {self._reconnect_delay:.1f}s...")
+            await asyncio.sleep(self._reconnect_delay)
+            self._reconnect_delay = min(
+                self._reconnect_delay * RECONNECT_BACKOFF_MULTIPLIER,
+                MAX_RECONNECT_DELAY,
+            )
+
+    async def _connect_and_run(self) -> None:
+        """Connect, authenticate, and handle messages."""
+        if not await self._wait_for_valid_token(buffer_s=TOKEN_REFRESH_BUFFER):
+            return
+
+        assert self._ws_token is not None
+        endpoint = self._ws_token.endpoint
+        token_version = self._token_version
+        logger.info("[%s] Connecting to %s...", self.config.device.name, endpoint[:50])
+
+        try:
+            async with websockets.connect(
+                endpoint,
+                origin="https://play.qobuz.com",
+                subprotocols=["qws"],
+                ping_interval=PING_INTERVAL,
+                ping_timeout=PONG_TIMEOUT,
+            ) as ws:
+                self._ws = ws
+
+                # Authenticate
+                if not await self._authenticate():
+                    return
+
+                # Subscribe to session
+                if not await self._subscribe():
+                    return
+
+                if token_version != self._token_version:
+                    raise TokenRefreshRequired()
+
+                # Send join session message
+                await self._send_join_session()
+
+                if token_version != self._token_version:
+                    raise TokenRefreshRequired()
+
+                self._is_connected = True
+                self._reconnect_delay = INITIAL_RECONNECT_DELAY  # Reset backoff
+                self._last_activity_time = time.monotonic()
+                self._refresh_deferred = False
+                logger.info("[%s] Connected and authenticated", self.config.device.name)
+
+                # Notify connected callback
+                if self._on_connected:
+                    self._on_connected()
+
+                # Message receive loop
+                await self._receive_loop()
+
+        except TokenRefreshRequired:
+            raise
+        except websockets.ConnectionClosed as e:
+            logger.warning(f"Connection closed: {e.code} {e.reason}")
+        except Exception as e:
+            logger.error(f"Connection failed: {e}")
+        finally:
+            self._invalidate_connection()
+            self._ws = None
+
+    async def _authenticate(self) -> bool:
+        """Send AUTHENTICATE message."""
+        if not self._ws_token:
+            return False
+        auth_frame = self._codec.encode_authenticate(self._ws_token.jwt)
+        await self._ws.send(auth_frame)
+        logger.debug("Sent AUTHENTICATE")
+        return True
+
+    async def _subscribe(self) -> bool:
+        """Send SUBSCRIBE message."""
+        if not self._session_uuid:
+            logger.error("No session UUID for subscribe")
+            return False
+
+        sub_frame = self._codec.encode_subscribe(self._session_uuid)
+        await self._ws.send(sub_frame)
+        logger.debug("Sent SUBSCRIBE")
+        return True
+
+    async def _send_join_session(self) -> None:
+        """Send join session message to register as renderer."""
+        if not self._session_uuid:
+            logger.error("No session UUID for join session")
+            return
+
+        activation_request = self._activation_request
+        is_active = activation_request is not None or self._renderer_active
+        self._active_confirmed = False
+        join_frame = self._codec.encode_join_session(
+            device_uuid=self._device_uuid,
+            friendly_name=self.config.device.name,
+            session_uuid=self._session_uuid,
+            max_audio_quality=self._max_audio_quality,
+            supports_volume_control=not (
+                self.config.backend.type == "dlna" and self.config.backend.dlna.fixed_volume
+            ),
+            device_type=DEVICE_TYPES[self.config.device.device_type],
+            is_active=is_active,
+            reason=(
+                JoinSessionReason.CONTROLLER_REQUEST
+                if activation_request is not None
+                else JoinSessionReason.RECONNECTION
+            ),
+        )
+        await self._ws.send(join_frame)
+        if self._activation_request is activation_request:
+            self._activation_request = None
+        logger.info(
+            "[%s] Sent JOIN_SESSION: isActive=%s, cause=%s, max_quality=%s",
+            self.config.device.name,
+            is_active,
+            "app selection" if activation_request is not None else "reconnect",
+            self._max_audio_quality,
+        )
+
+    async def _receive_loop(self) -> None:
+        """Receive and dispatch messages."""
+        while self._should_run and self._ws:
+            try:
+                data = await asyncio.wait_for(
+                    self._ws.recv(),
+                    timeout=RECV_TIMEOUT,
+                )
+                await self._handle_message(data)
+
+            except asyncio.TimeoutError:
+                self._check_token_refresh()
+
+            except websockets.ConnectionClosed:
+                raise
+
+    def _check_token_refresh(self) -> None:
+        """Reconnect with a fresh token, once the session is quiet enough.
+
+        Swapping the token means dropping and re-establishing the connection,
+        and the Qobuz app pauses a renderer that disappears and comes back
+        mid-track. So an expiring token only triggers the reconnect after the
+        session has gone quiet, matching the StreamCore32 reference, which
+        gates the same reconnect on 60s without a transmission (its player
+        heartbeat keeps sending while a track is loaded). Inbound commands
+        count as activity too: a play command after a quiet spell means the
+        session is about to get busy, and the reconnect must not land while the
+        track is still loading and nothing has been sent yet. If the session
+        never goes quiet the token lapses and the server closes the connection;
+        the reconnect that follows mints a fresh token.
+        """
+        if not (self._ws_token and self._ws_token.is_expired(TOKEN_REFRESH_BUFFER)):
+            return
+
+        if time.monotonic() - self._last_activity_time < TOKEN_REFRESH_IDLE_PERIOD:
+            if not self._refresh_deferred:
+                logger.info("Token expiring soon, deferring refresh until the session is idle")
+                self._refresh_deferred = True
+            return
+
+        logger.warning("[%s] Token expiring soon, need refresh", self.config.device.name)
+        raise TokenRefreshRequired()
+
+    async def _handle_message(self, data: bytes) -> None:
+        """Decode and route incoming message."""
+        decoded = self._codec.decode_frame(data)
+        if not decoded:
+            return
+
+        if decoded.msg_type == MessageType.PAYLOAD:
+            await self._handle_payload(decoded)
+        elif decoded.msg_type == MessageType.ERROR:
+            logger.error(f"Server error {decoded.error_code}: {decoded.error_message}")
+        elif decoded.msg_type == MessageType.DISCONNECT:
+            logger.warning("Server requested disconnect")
+            raise websockets.ConnectionClosed(None, None)
+
+    async def _handle_payload(self, decoded: DecodedMessage) -> None:
+        """Handle PAYLOAD message by routing to registered handlers."""
+        if not self._is_connected or not decoded.payload:
+            return
+
+        batch = self._codec.decode_qconnect_batch(decoded.payload)
+        if not batch:
+            return
+
+        for msg in batch.messages:
+            msg_type = msg.messageType
+            if self._external_playback:
+                # Stale cloud activation/snapshots cannot reclaim an external source.
+                continue
+            if msg_type == QConnectMessageType.SRVR_RNDR_SET_ACTIVE and msg.HasField(
+                "srvrRndrSetActive"
+            ):
+                # A present SET_ACTIVE payload with an omitted boolean means
+                # false. Requiring field presence would lose deactivation.
+                # Do this synchronously, before any handler task can await a
+                # slow backend or send a final STOPPED report after deactivation.
+                self._renderer_active = msg.srvrRndrSetActive.active
+                self._active_confirmed = True
+                self._ownership_generation += 1
+                logger.info(
+                    "[%s] Renderer set active: %s", self.config.device.name, self._renderer_active
+                )
+            handler = self._handlers.get(msg_type)
+            if handler:
+                self._last_activity_time = time.monotonic()
+                try:
+                    handler(msg_type, msg)
+                except Exception as e:
+                    logger.error(f"Handler error for type {msg_type}: {e}")
+            else:
+                logger.debug(f"No handler for message type {msg_type}")
+
+    async def _wait_for_valid_token(self, buffer_s: int = 0) -> bool:
+        """Obtain a non-expired token, or wait until one arrives or shutdown is requested.
+
+        Tries the token refresher (self-mint via the Qobuz API) first; falls
+        back to waiting for the Qobuz app to push fresh tokens, retrying the
+        refresher periodically in case the failure was transient.
+        """
+        logged_wait = False
+
+        while self._should_run:
+            if (
+                self._ws_token
+                and self._ws_token.is_valid()
+                and not self._ws_token.is_expired(buffer_s)
+            ):
+                return True
+
+            if self._token_refresher:
+                try:
+                    token = await self._token_refresher()
+                except Exception as e:
+                    logger.warning(f"WS token refresh failed: {e}")
+                    token = None
+                if token and token.is_valid() and not token.is_expired(buffer_s):
+                    self._ws_token = token
+                    return True
+
+            if not logged_wait:
+                logger.warning("Token expired, waiting for refreshed token from Qobuz app")
+                logged_wait = True
+
+            token_version = self._token_version
+            self._token_update_event.clear()
+            if self._token_version != token_version:
+                continue
+            if self._token_refresher:
+                # Wake up periodically to retry the refresher even if the app
+                # never reconnects.
+                try:
+                    await asyncio.wait_for(
+                        self._token_update_event.wait(), timeout=TOKEN_MINT_RETRY_DELAY
+                    )
+                except asyncio.TimeoutError:
+                    pass
+            else:
+                await self._token_update_event.wait()
+
+        return False
+
+    async def _close_for_token_refresh(self) -> None:
+        """Close the current connection so refreshed tokens are used immediately."""
+        if not self._ws:
+            return
+
+        try:
+            await self._ws.close()
+        except Exception as e:
+            logger.debug(f"Failed to close WebSocket after token refresh: {e}")
+
+    # -------------------------------------------------------------------------
+    # Utilities
+    # -------------------------------------------------------------------------
+
+    def _uuid_to_bytes(self, uuid_str: str) -> bytes:
+        """Convert UUID string to 16 bytes."""
+        try:
+            return uuid.UUID(uuid_str).bytes
+        except ValueError:
+            # Fallback: hash the string
+            import hashlib
+
+            return hashlib.md5(uuid_str.encode()).digest()

@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <base href="{{base}}">
+    <script>window.QOBUZ_DIRECT_PORT = "{{http_port}}";</script>
+    <title>qobuz-proxy</title>
+    <link rel="stylesheet" href="static/style.css?v={{version}}">
+</head>
+<body>
+    <div class="container">
+        <h1>qobuz-proxy</h1>
+
+        <!-- Auth State: Not authenticated -->
+        <div id="auth-disconnected" class="card card-error">
+            <div class="card-header">
+                <span class="status-dot status-error"></span>
+                <span>Not connected</span>
+            </div>
+            <p>You need to log in to your Qobuz account to use qobuz-proxy.</p>
+            <div id="login-error" class="error-message" style="display: none;"></div>
+            <button onclick="startLogin()">Log in to Qobuz</button>
+        </div>
+
+        <!-- Auth State: Authenticated -->
+        <div id="auth-connected" class="card card-success" style="display: none;">
+            <div class="card-header">
+                <span class="status-dot status-success"></span>
+                <span>Connected</span>
+            </div>
+            <div class="auth-user">
+                <img id="auth-avatar" class="auth-avatar" src="" alt="" style="display: none;">
+                <div class="auth-user-info">
+                    <strong id="auth-name"></strong>
+                    <span id="auth-email" class="auth-email"></span>
+                </div>
+                <button class="button-danger" onclick="logout()">Logout</button>
+            </div>
+        </div>
+
+        <!-- Speakers Section -->
+        <div class="card" id="speakers-section">
+            <div class="speakers-header">
+                <h2>Speakers</h2>
+                <button id="add-speaker-btn" onclick="showAddSpeaker()" style="display: none;">+ Add Speaker</button>
+            </div>
+            <div id="speakers-list">
+                <p class="muted">Waiting for authentication...</p>
+            </div>
+            <div id="add-speaker-panel" style="display: none;"></div>
+            <div id="speaker-error" class="error-message" style="display: none;"></div>
+        </div>
+
+        <!-- System Section -->
+        <div class="card">
+            <h2>System</h2>
+            <div class="system-info">
+                <div class="info-row">
+                    <span class="info-label">Version</span>
+                    <span id="system-version">--</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Uptime</span>
+                    <span id="system-uptime">--</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="static/app.js?v={{version}}"></script>
+</body>
+</html>
