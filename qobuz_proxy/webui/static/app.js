@@ -44,6 +44,8 @@
         if (window.self !== window.top) {
             var port = window.QOBUZ_DIRECT_PORT || "8689";
             var direct = window.location.protocol + "//" + window.location.hostname + ":" + port;
+            // ma.js knows the LAN address when the panel is opened remotely
+            if (typeof window.qobuzDirectBase === "function") direct = window.qobuzDirectBase() || direct;
             window.open(direct + "/auth/login?origin=" + encodeURIComponent(direct), "_blank");
         } else {
             window.location.href = url;
