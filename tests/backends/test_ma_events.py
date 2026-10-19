@@ -7,7 +7,6 @@ real client + real connection, Player callbacks mocked).
 
 import asyncio
 import json
-import time
 from typing import Any, Callable
 
 import pytest
@@ -28,17 +27,6 @@ from tests.backends.conftest import (  # noqa: E402
     Rig,
     meta,
 )
-from tests.backends.fake_music_assistant import FakeMAServer  # noqa: E402
-
-
-def device_reports(server: FakeMAServer, state: MAState) -> None:
-    """The speaker changes state by itself (a renderer event, no MA play action).
-
-    E.g. a DLNA renderer's STOPPED/PLAYING flicker while MA restarts the stream for a seek.
-    """
-    with server._operation():
-        server._device_set_state(QID, state)
-        server._on_player_update(QID)
 
 
 async def other_client_clears_the_queue(r: Rig) -> None:
@@ -103,10 +91,10 @@ class TestTrackEnd:
         timing(IDLE_SETTLE_SECONDS=0.2)
         await rig.play_for("101", 30)
 
-        device_reports(rig.server, MAState.IDLE)  # stream restart for a seek...
+        rig.server.device_reports(QID, MAState.IDLE)  # stream restart for a seek...
         await rig.settle()
         assert rig.queue().state == MAState.IDLE
-        device_reports(rig.server, MAState.PLAYING)  # ...and it plays again
+        rig.server.device_reports(QID, MAState.PLAYING)  # ...and it plays again
         await rig.idle(0.3)
 
         assert rig.cb.endings() == NOTHING_FIRED
@@ -122,9 +110,9 @@ class TestTrackEnd:
         await rig.backend.seek(120_000)
         await rig.settle()
 
-        device_reports(rig.server, MAState.IDLE)
+        rig.server.device_reports(QID, MAState.IDLE)
         await rig.settle()
-        device_reports(rig.server, MAState.PLAYING)
+        rig.server.device_reports(QID, MAState.PLAYING)
         await rig.idle(0.3)
 
         assert rig.cb.endings() == NOTHING_FIRED
@@ -136,14 +124,7 @@ class TestTrackEnd:
         timing: Callable[..., None],
     ) -> None:
         timing(START_GRACE_SECONDS=0.1)
-        server = rig.server
-        real_device_play = server._device_play
-
-        def speaker_does_not_start(player_id: str, item: Any, seek_position: float) -> None:
-            real_device_play(player_id, item, seek_position)
-            server.players[player_id].playback_state = MAState.IDLE
-
-        server._device_play = speaker_does_not_start  # type: ignore[method-assign]
+        rig.server.dead_player_ids.add(QID)
 
         await rig.play("101")
         assert rig.queue().state == MAState.IDLE
@@ -292,11 +273,7 @@ class TestMAUserActions:
         rig.cb.position.reset_mock()
 
         # The speaker jumps by itself (its own app/buttons): MA only sends QUEUE_TIME_UPDATED
-        with rig.server._operation():
-            player = rig.server.players[QID]
-            player.elapsed_time = 90.0
-            player.elapsed_time_last_updated = time.time()
-            rig.server._on_player_update(QID)
+        rig.server.device_reports(QID, elapsed=90.0)
 
         await rig.wait(lambda: rig.cb.position.called)
         assert rig.cb.position.call_args.args[0] == pytest.approx(90_000, abs=1_500)

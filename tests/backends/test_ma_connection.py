@@ -275,7 +275,7 @@ class TestReconnect:
     ) -> None:
         monkeypatch.setattr(connection_module, "LOAD_TIMEOUT_SECONDS", 0.05)
         states = record_states(conn)
-        server.hang_init = True
+        server.gate("players/all")
         await conn.start()
 
         await wait_for(lambda: len(server.created_clients) >= 3, server, what="retries")
@@ -285,7 +285,7 @@ class TestReconnect:
         )
         assert len(server.clients) <= 1  # hung clients are closed, not leaked
 
-        server.hang_init = False
+        server.release("players/all")
         await wait_for(lambda: conn.is_connected, server)
 
 

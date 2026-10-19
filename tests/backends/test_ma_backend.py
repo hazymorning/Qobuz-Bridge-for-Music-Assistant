@@ -4,7 +4,7 @@ The rig (``conftest.py``) drives the backend like the Player does and reads MA's
 """
 
 import asyncio
-from typing import Any, Callable
+from typing import Callable
 
 import pytest
 
@@ -489,9 +489,7 @@ class TestVolume:
         rig.cb.volume.assert_called_once_with(65)
         assert await rig.backend.get_volume() == 65
 
-    @pytest.mark.parametrize("updates_after_result", [False, True])
-    async def test_our_own_change_is_not_echoed(self, rig: Rig, updates_after_result: bool) -> None:
-        rig.server.player_updates_after_result = updates_after_result
+    async def test_our_own_change_is_not_echoed(self, rig: Rig) -> None:
         await rig.backend.set_volume(40)
         await rig.backend.set_volume(45)
         await rig.idle(0.15)
@@ -546,16 +544,6 @@ class TestSessionSetup:
 
     async def test_dynamic_queue_repeat_is_turned_off_after_the_replace(self, rig: Rig) -> None:
         # MA refuses repeat changes while a queue is dynamic; a REPLACE ends dynamic mode
-        # (MA 2.10.7 queue_loader). The fake keeps is_dynamic, so emulate MA here.
-        server = rig.server
-        original = server._commands["player_queues/play_media"]
-
-        def play_media(sock: Any, queue_id: str, media: Any, option: Any = None, **kw: Any) -> Any:
-            if option == "replace":
-                server.queue(queue_id).is_dynamic = False
-            return original(sock, queue_id, media, option, **kw)
-
-        server._commands["player_queues/play_media"] = play_media
         rig.queue().is_dynamic = True
         rig.queue().repeat_mode = RepeatMode.ONE
 

@@ -1,57 +1,15 @@
-"""In-memory Music Assistant 2.10.7 server driving the *real* ``music-assistant-client`` 1.6.0.
+"""In-memory Music Assistant 2.10.7 server that drives the real ``music-assistant-client``.
 
-Test helper module (not collected by pytest). Import it only after
-``pytest.importorskip("music_assistant_client")``.
+:class:`FakeMAServer` keeps what a real MA server keeps (players, queues, queue items,
+providers, tokens) and outlives the single-use clients the product builds on every reconnect.
+Its queue logic is a port of MA 2.10.7 ``controllers/player_queues`` and it emits the same
+events in the same order. Only the websocket is fake: :class:`FakeMusicAssistantClient` is the
+real client with :class:`FakeWebsocketsConnection` swapped in, so the product's error handling
+and event races run against real client code.
 
-How it fits together
---------------------
-* :class:`FakeMAServer` holds the state a real Music Assistant server keeps: players, queues and
-  queue items, providers and tokens. It outlives client instances, just as the real server
-  outlives the single-use ``MusicAssistantClient`` that production code builds on every
-  reconnect. Its queue logic is a port of MA 2.10.7 ``controllers/player_queues``
-  (``queue_loader._enqueue_with_option``, ``helpers.committed_index``, ``controller.play_index``
-  / ``next`` / ``previous`` / ``seek`` / ``delete_item`` / ``mark_ended``,
-  ``playback_tracker._update_queue_from_player``). It emits the same events in the same order:
-  QUEUE_UPDATED flapping ``extra_attributes["play_action_in_progress"]`` around every play
-  action, QUEUE_ITEMS_UPDATED before its QUEUE_UPDATED, QUEUE_TIME_UPDATED only for jumps of
-  more than 2 s, and PLAYER_UPDATED only when the player state really changed.
-* :class:`FakeMusicAssistantClient` *is* the real ``MusicAssistantClient``. Only the websocket
-  transport is swapped for :class:`FakeWebsocketsConnection`, which passes JSON messages to the
-  fake server. Everything else is real client code: ``connect()`` error mapping,
-  ``send_command`` futures, ``start_listening`` / ``disconnect`` single-use semantics, the
-  Players/PlayerQueues caches and the ``call_soon`` subscriber dispatch (caches first, because
-  they subscribe first). So production ``except`` clauses and event races are exercised for real.
-
-Typical use::
-
-    server = FakeMAServer()
-    server.add_qobuz_provider()
-    server.add_player("up1", "Kitchen")
-    conn = MusicAssistantConnection(server.url, server.token,
-                                    client_factory=server.client_factory)
-    # or, without production code: client, listen_task = await server.connect_client()
-    ...
-    server.start_playing("up1", ["123", "456"])   # someone/something plays two Qobuz tracks
-    server.ui_pause("up1")                           # the MA UI pauses
-    await server.settle()                            # let the events reach the clients
-    assert server.calls("player_queues/play_media")[-1]["option"] == "replace"
-
-Deliberate simplifications (documented so tests do not rely on them):
-* Server-side handlers are synchronous: a command's events and its result are queued together.
-  Use :meth:`FakeMAServer.gate` to hold a command before it runs, ``fail_next`` to make it fail,
-  drop the socket, or hang. The real 1 s debounce of ``next``/``previous`` and the player-start
-  wait of ``play_index`` are collapsed: the item starts at once.
-* PLAYER_UPDATED is coalesced to one event per player at the end of each command or hook. By
-  default it is queued before the command result. With ``player_updates_after_result = True`` it
-  comes after the result, like MA's 0.25 s debounce.
-* Time does not pass on its own. :meth:`FakeMAServer.advance_time` moves a playing queue forward
-  (server state plus every client's cached anchor), and :meth:`FakeMAServer.finish_current_track`
-  ends the track. MA's ~5 s end-of-queue settle is a separate call,
-  :meth:`FakeMAServer.mark_ended`, and the 30 s paused auto-stop is
-  :meth:`FakeMAServer.auto_stop_after_pause`.
-* Not emitted: MEDIA_ITEM_PLAYED, CORE_STATE_UPDATED, autoplay refills (use
-  :meth:`FakeMAServer.autoplay_fill`). Commands the fake does not implement are answered like
-  unknown commands (InvalidCommand, "Invalid command: ...").
+Time never passes on its own: :meth:`FakeMAServer.advance_time`, ``finish_current_track``,
+``mark_ended`` and ``auto_stop_after_pause`` stand in for MA's timers, and ``settle()`` only
+yields to the event loop, so tests patch the product's timing constants.
 """
 
 from __future__ import annotations
@@ -72,21 +30,16 @@ from urllib.parse import urlparse
 import aiohttp
 from music_assistant_client import MusicAssistantClient
 from music_assistant_client.connection import get_websocket_url
-from music_assistant_client.constants import API_SCHEMA_VERSION
 from music_assistant_client.exceptions import (
     CannotConnect,
     ConnectionClosed,
     ConnectionFailed,
-    InvalidMessage,
-    InvalidServerVersion,
     InvalidState,
-    MusicAssistantClientException,
     NotConnected,
-    TransportError,
 )
 from music_assistant_client.helpers import json_dumps, json_loads
 from music_assistant_models.api import ServerInfoMessage, SuccessResultMessage
-from music_assistant_models.auth import AuthToken, User
+from music_assistant_models.auth import User
 from music_assistant_models.enums import (
     CoreState,
     EventType,
@@ -99,7 +52,6 @@ from music_assistant_models.enums import (
     RepeatMode,
 )
 from music_assistant_models.errors import (
-    AuthenticationFailed,
     AuthenticationRequired,
     InsufficientPermissions,
     InvalidCommand,
@@ -109,11 +61,9 @@ from music_assistant_models.errors import (
     LoginFailed,
     MediaNotFoundError,
     MusicAssistantError,
-    PlayerCommandFailed,
     PlayerUnavailableError,
     ProviderUnavailableError,
     QueueEmpty,
-    UnplayableMediaError,
     UnsupportedFeaturedException,
 )
 from music_assistant_models.event import MassEvent
@@ -131,51 +81,6 @@ from music_assistant_models.provider import ProviderInstance
 from music_assistant_models.queue_item import QueueItem
 from music_assistant_models.unique_list import UniqueList
 
-__all__ = [
-    # fakes
-    "FakeMAServer",
-    "FakeMusicAssistantClient",
-    "FakeWebsocketsConnection",
-    "FakeTrack",
-    "committed_index",
-    # constants
-    "ATTR_PLAY_ACTION_IN_PROGRESS",
-    "DEFAULT_PLAYER_FEATURES",
-    "DEFAULT_TOKEN",
-    "DEFAULT_TRACK_DURATION",
-    "DEFAULT_URL",
-    "DROP",
-    "DROP_HARD",
-    "HANG",
-    "QOBUZ_INSTANCE_ID",
-    "READ_COMMANDS",
-    # the real exception classes the fake raises (re-exported for convenience)
-    "AuthenticationFailed",
-    "AuthenticationRequired",
-    "CannotConnect",
-    "ConnectionClosed",
-    "ConnectionFailed",
-    "InsufficientPermissions",
-    "InvalidCommand",
-    "InvalidDataError",
-    "InvalidMessage",
-    "InvalidProviderURI",
-    "InvalidServerVersion",
-    "InvalidState",
-    "InvalidToken",
-    "LoginFailed",
-    "MediaNotFoundError",
-    "MusicAssistantClientException",
-    "MusicAssistantError",
-    "NotConnected",
-    "PlayerCommandFailed",
-    "PlayerUnavailableError",
-    "ProviderUnavailableError",
-    "QueueEmpty",
-    "TransportError",
-    "UnplayableMediaError",
-    "UnsupportedFeaturedException",
-]
 
 logger = logging.getLogger(__name__)
 
@@ -246,16 +151,6 @@ def committed_index(queue: PlayerQueue) -> Optional[int]:
 def _wire(value: Any) -> Any:
     """Return ``value`` exactly as it arrives on the other side of the websocket."""
     return json_loads(json_dumps(value))
-
-
-@dataclass
-class FakeTrack:
-    """Catalogue entry for a track id (anything left empty gets a default)."""
-
-    title: str = ""
-    artist: str = ""
-    album: str = ""
-    duration: Optional[int] = None
 
 
 @dataclass
@@ -400,12 +295,9 @@ class FakeWebsocketsConnection:
         if not self.connected:
             raise NotConnected
         assert self._socket
-        assert isinstance(message, dict)
+        if self._socket.closed:
+            raise aiohttp.ClientConnectionResetError("Cannot write to closing transport")
         self._socket.from_client(_wire(message))
-
-    def __repr__(self) -> str:
-        prefix = "" if self.connected else "not "
-        return f"{type(self).__name__}(ws_server_url={self.ws_server_url!r}, {prefix}connected)"
 
 
 # ------------------------------------------------------------------------------------------ client
@@ -487,29 +379,24 @@ class FakeMAServer:
     ) -> None:
         self.url = url
         self.aliases: set[str] = set()  # other URLs that reach this server
-        self.server_id = "fakemaserver"
         self.server_version = server_version
         self.schema_version = schema_version
         self.min_schema_version = min_schema_version
-        self.homeassistant_addon = True
         self.token = token
         self.valid_tokens: set[str] = {token} if token else set()
         self.users: dict[str, str] = {"admin": "admin-password"}
         self.guest_users: set[str] = set()
         self.reachable = True
         self.setup_required = False
-        self.hang_init = False
-        self.command_yields = 1
-        self.player_updates_after_result = False
 
         self.players: dict[str, Player] = {}
         self.queues: dict[str, PlayerQueue] = {}
         self.queue_items: dict[str, list[QueueItem]] = {}
         self.providers: list[ProviderInstance] = []
-        self.tracks: dict[str, FakeTrack] = {}
         self.unplayable_track_ids: set[str] = set()
         self.stream_failure_track_ids: set[str] = set()
         self.library_track_ids: set[str] = set()
+        self.dead_player_ids: set[str] = set()  # speakers that never start playing
 
         self.command_log: list[tuple[str, dict[str, Any]]] = []
         self.events: list[MassEvent] = []
@@ -757,34 +644,11 @@ class FakeMAServer:
         self._emit(EventType.PROVIDERS_UPDATED, None, list(self.providers))
         return provider
 
-    def set_provider_available(self, instance_id: str, available: bool) -> None:
-        """Flip a provider's availability (emits PROVIDERS_UPDATED)."""
-        for provider in self.providers:
-            if provider.instance_id == instance_id:
-                provider.available = available
-        self._emit(EventType.PROVIDERS_UPDATED, None, list(self.providers))
-
-    def set_track(
-        self,
-        track_id: str,
-        *,
-        title: str = "",
-        artist: str = "",
-        album: str = "",
-        duration: Optional[int] = None,
-    ) -> None:
-        """Describe a catalogue track (defaults: 'Track <id>', 'Test Artist', 200 s)."""
-        self.tracks[str(track_id)] = FakeTrack(title, artist, album, duration)
-
     # --------------------------------------------------------------------------- inspection
 
     def queue(self, queue_id: str) -> PlayerQueue:
         """Server-side queue (live object)."""
         return self.queues[queue_id]
-
-    def items(self, queue_id: str) -> list[QueueItem]:
-        """Server-side queue items (a new list of the live items)."""
-        return list(self.queue_items[queue_id])
 
     def item_ids(self, queue_id: str) -> list[str]:
         """``queue_item_id`` of every item, in queue order."""
@@ -802,14 +666,6 @@ class FakeMAServer:
     def writes(self) -> list[tuple[str, dict[str, Any]]]:
         """``command_log`` without read-only commands: what a client asked MA to *do*."""
         return [(name, args) for name, args in self.command_log if name not in READ_COMMANDS]
-
-    def events_of(self, event: EventType, object_id: Optional[str] = None) -> list[MassEvent]:
-        """Emitted events of one type (optionally for one object id)."""
-        return [
-            ev
-            for ev in self.events
-            if ev.event == event and (object_id is None or ev.object_id == object_id)
-        ]
 
     def clear_logs(self) -> None:
         """Forget ``command_log`` and ``events``."""
@@ -888,9 +744,6 @@ class FakeMAServer:
                     media = cached_player.current_media
                     if media is not None and media.elapsed_time_last_updated is not None:
                         media.elapsed_time_last_updated -= seconds
-            for frame in sock.inbox:
-                if isinstance(frame, dict) and frame.get("object_id") == queue_id:
-                    _shift_wire_anchor(frame.get("data"), seconds)
 
     def finish_current_track(self, queue_id: str) -> None:
         """The current track ends naturally on the speaker.
@@ -1044,19 +897,6 @@ class FakeMAServer:
             self._handle_play_media(queue_id, media, QueueOption.REPLACE)
             return [copy.deepcopy(item) for item in self.queue_items[queue_id]]
 
-    def autoplay_fill(self, queue_id: str, count: int = 3) -> list[QueueItem]:
-        """MA's autoplay ("don't stop the music") appends ``count`` similar non-Qobuz tracks."""
-        with self._operation():
-            new_items = []
-            for _ in range(count):
-                self._radio_seq += 1
-                track_id = f"ap{self._radio_seq}"
-                track = self._make_track("spotify--test", "spotify", track_id)
-                new_items.append(self._build_queue_item(queue_id, track))
-            items = self.queue_items[queue_id]
-            self._load(queue_id, new_items, insert_at_index=len(items) + 1)
-            return [copy.deepcopy(item) for item in new_items]
-
     def switch_source(self, player_id: str, source: Optional[str] = "spotify") -> None:
         """The speaker switches to another source (PLAYER_UPDATED, then QUEUE_UPDATED).
 
@@ -1088,6 +928,22 @@ class FakeMAServer:
             self._flush_players()
             if player_id in self.queues:
                 self._on_player_update(player_id)
+
+    def device_reports(
+        self,
+        player_id: str,
+        state: Optional[PlaybackState] = None,
+        elapsed: Optional[float] = None,
+    ) -> None:
+        """The speaker changes state or position by itself (not an MA play action)."""
+        with self._operation():
+            if state is not None:
+                self._device_set_state(player_id, state)
+            if elapsed is not None:
+                player = self.players[player_id]
+                player.elapsed_time = elapsed
+                player.elapsed_time_last_updated = time.time()
+            self._on_player_update(player_id)
 
     def set_player_volume(self, player_id: str, level: int) -> None:
         """Volume changed in MA's UI / on the device (PLAYER_UPDATED; groups: group_volume)."""
@@ -1181,50 +1037,6 @@ class FakeMAServer:
         self._register_token(session_token, username, "session", long_lived=False)
         return self._user(username), session_token
 
-    async def create_long_lived_token(
-        self,
-        server_url: str,
-        access_token: str,
-        token_name: str = "Music Assistant Client",  # noqa: S107
-        aiohttp_session: Optional[aiohttp.ClientSession] = None,
-        ssl_context: Any = None,
-    ) -> str:
-        """Fake ``music_assistant_client.create_long_lived_token`` (runs a real fake client)."""
-        async with self.client_class(
-            server_url, aiohttp_session, access_token, ssl_context
-        ) as client:
-            token: str = await client.auth.create_token(token_name)
-            return token
-
-    async def login_with_token(
-        self,
-        server_url: str,
-        username: str,
-        password: str,
-        token_name: str = "Music Assistant Client",  # noqa: S107
-        aiohttp_session: Optional[aiohttp.ClientSession] = None,
-        ssl_context: Any = None,
-    ) -> tuple[User, str]:
-        """Fake ``music_assistant_client.login_with_token``."""
-        user, access_token = await self.login(
-            server_url, username, password, aiohttp_session, ssl_context
-        )
-        long_lived = await self.create_long_lived_token(
-            server_url, access_token, token_name, aiohttp_session, ssl_context
-        )
-        return user, long_lived
-
-    async def get_server_info(
-        self,
-        server_url: str,
-        aiohttp_session: Optional[aiohttp.ClientSession] = None,
-        ssl_context: Any = None,
-    ) -> ServerInfoMessage:
-        """Fake ``music_assistant_client.get_server_info`` (GET /info, no auth)."""
-        await asyncio.sleep(0)
-        self._check_http(server_url)
-        return ServerInfoMessage.from_dict(self._server_info_dict())
-
     def _check_http(self, server_url: str) -> None:
         if not self.reachable or not self._url_matches(server_url):
             parsed = urlparse(server_url)
@@ -1276,12 +1088,12 @@ class FakeMAServer:
 
     def _server_info_dict(self) -> dict[str, Any]:
         info = ServerInfoMessage(
-            server_id=self.server_id,
+            server_id="fakemaserver",
             server_version=self.server_version,
             schema_version=self.schema_version,
             min_supported_schema_version=self.min_schema_version,
             base_url=self.url,
-            homeassistant_addon=self.homeassistant_addon,
+            homeassistant_addon=True,
             onboard_done=not self.setup_required,
             name="Music Assistant",
             status=CoreState.RUNNING,
@@ -1298,19 +1110,9 @@ class FakeMAServer:
         message_id = raw.get("message_id")
         command = str(raw.get("command", ""))
         args: dict[str, Any] = dict(raw.get("args") or {})
-        for _ in range(self.command_yields):
-            await asyncio.sleep(0)
+        await asyncio.sleep(0)
         if command == "auth":
             sock.push(self._handle_auth(sock, message_id, args))
-            return
-        if not sock.authenticated:
-            sock.push(
-                _error_frame(
-                    message_id,
-                    AuthenticationRequired.error_code,
-                    "Authentication required. Please send auth command first.",
-                )
-            )
             return
         self.command_log.append((command, copy.deepcopy(args)))
         gate = self._gates.get(command)
@@ -1334,18 +1136,15 @@ class FakeMAServer:
                 raise TypeError(f"fail_next[{command!r}] must be an exception or DROP/HANG")
             sock.push(_exception_frame(message_id, failure))
             return
-        if command == "dashboard/sessions" and self.hang_init:
-            return  # the initial state fetch never completes
         handler = self._commands.get(command)
         if handler is None:
             sock.push(
                 _error_frame(message_id, InvalidCommand.error_code, f"Invalid command: {command}")
             )
             return
-        defer = self.player_updates_after_result
         frame: dict[str, Any]
         try:
-            with self._operation(flush=not defer):
+            with self._operation(flush=False):
                 kwargs = self._bind_args(command, args)
                 result = handler(sock, **kwargs)
         except Exception as err:  # noqa: BLE001 - the real server answers every error
@@ -1353,8 +1152,7 @@ class FakeMAServer:
         else:
             frame = _wire(SuccessResultMessage(message_id, result).to_dict())
         sock.push(frame)
-        if defer:
-            self._flush_players()
+        self._flush_players()  # after the result, like MA's 0.25 s debounce
 
     def _bind_args(self, command: str, args: dict[str, Any]) -> dict[str, Any]:
         """Like MA's ``parse_arguments(strict=False)``: extra args are ignored."""
@@ -1649,24 +1447,8 @@ class FakeMAServer:
             and queue.index_in_buffer is not None
             and self._index_by_id(queue_id, current.queue_item_id) is None
         ):
-            self._resync_position(queue_id)
+            pass
         self._signal(queue_id, items_changed=True)
-
-    def _resync_position(self, queue_id: str) -> None:
-        queue = self.queues[queue_id]
-        items = self.queue_items[queue_id]
-        if queue.current_index is not None and items:
-            queue.current_index = min(queue.current_index, len(items) - 1)
-        else:
-            queue.current_index = None
-        queue.current_item = self._get_item(queue_id, queue.current_index)
-        queue.next_item = (
-            self._get_next_item(queue_id, queue.current_index)
-            if queue.current_index is not None
-            else None
-        )
-        queue.elapsed_time = 0.0
-        queue.elapsed_time_last_updated = time.time()
 
     def _load(
         self,
@@ -1675,7 +1457,6 @@ class FakeMAServer:
         insert_at_index: int = 0,
         keep_remaining: bool = True,
         keep_played: bool = True,
-        shuffle: bool = False,
     ) -> None:
         current = self.queue_items[queue_id]
         prev_items = current[:insert_at_index] if keep_played else []
@@ -1684,8 +1465,6 @@ class FakeMAServer:
             next_items += current[insert_at_index:]
         for index, item in enumerate(next_items):
             item.sort_index += insert_at_index + index
-        if shuffle:
-            next_items = self._rng.sample(next_items, len(next_items))
         self._update_items(queue_id, prev_items + next_items)
 
     def _ensure_current_index(self, queue_id: str) -> None:
@@ -1694,17 +1473,6 @@ class FakeMAServer:
             return
         queue.current_index = 0
         queue.current_item = self._get_item(queue_id, 0)
-        self._signal(queue_id)
-
-    def _continue_ended_queue(self, queue_id: str, first_added_index: int) -> None:
-        queue = self.queues[queue_id]
-        queue.ended = False
-        current = self._get_item(queue_id, first_added_index)
-        if current is None:
-            return
-        queue.current_index = first_added_index
-        queue.current_item = current
-        queue.next_item = self._get_next_item(queue_id, first_added_index)
         self._signal(queue_id)
 
     def _clear(self, queue_id: str, skip_stop: bool = False) -> None:
@@ -1722,37 +1490,11 @@ class FakeMAServer:
             # MA schedules this stop as a task: it lands after the clear's own events
             self._handle_stop(queue_id)
 
-    def _set_shuffle(self, queue_id: str, shuffle_enabled: bool) -> None:
-        queue = self.queues[queue_id]
-        if queue.shuffle_enabled == shuffle_enabled:
-            return
-        if queue.is_dynamic:
-            raise InvalidCommand("Cannot change shuffle while the queue is in dynamic mode")
-        queue.shuffle_enabled = shuffle_enabled
-        items = self.queue_items[queue_id]
-        cur_index = committed_index(queue)
-        if cur_index is not None:
-            next_index = cur_index + 1
-            next_items = items[next_index:]
-        else:
-            next_index = 0
-            next_items = []
-        if not shuffle_enabled:
-            next_items.sort(key=lambda x: x.sort_index)
-        self._load(
-            queue_id,
-            next_items,
-            insert_at_index=next_index,
-            keep_remaining=False,
-            shuffle=shuffle_enabled,
-        )
-
     def _handle_play_media(
         self,
         queue_id: str,
         media: Any,
         option: Optional[Union[QueueOption, str]] = None,
-        shuffle: Optional[bool] = None,
     ) -> None:
         """``controller.play_media`` + ``queue_loader._handle_play_media`` (linear queues)."""
         if queue_id not in self.queues:
@@ -1764,7 +1506,6 @@ class FakeMAServer:
             media_list = media if isinstance(media, list) else [media]
             resolved_option = QueueOption(option) if option is not None else None
             resolved: list[MediaItem] = []
-            shuffle_settled = False
             for entry in media_list:
                 try:
                     media_item = self._resolve_media(entry)
@@ -1777,12 +1518,7 @@ class FakeMAServer:
                         if media_item.media_type == MediaType.RADIO
                         else QueueOption.PLAY
                     )
-                if not shuffle_settled:
-                    shuffle_settled = True
-                    self._apply_shuffle(queue_id, resolved_option, shuffle)
                 resolved.append(media_item)
-            if not shuffle_settled and resolved_option is not None:
-                self._apply_shuffle(queue_id, resolved_option, shuffle)
             queue_items = [
                 self._build_queue_item(queue_id, item) for item in resolved if item.available
             ]
@@ -1790,11 +1526,6 @@ class FakeMAServer:
                 raise MediaNotFoundError("No playable items found")
             assert resolved_option is not None
             self._enqueue_with_option(queue_id, queue, queue_items, resolved_option)
-
-    def _apply_shuffle(self, queue_id: str, option: QueueOption, shuffle: Optional[bool]) -> None:
-        if shuffle is None or option not in (QueueOption.PLAY, QueueOption.REPLACE):
-            return
-        self._set_shuffle(queue_id, bool(shuffle))
 
     def _enqueue_with_option(
         self,
@@ -1805,22 +1536,19 @@ class FakeMAServer:
     ) -> None:
         """``queue_loader._enqueue_with_option``."""
         continues_ended_queue = queue.ended and option == QueueOption.ADD
-        items_before_add = len(self.queue_items[queue_id])
         if queue.ended and not continues_ended_queue and option != QueueOption.REPLACE:
             self._clear(queue_id, skip_stop=True)
         insert_at_index = self._insert_index(queue)
-        shuffle = queue.shuffle_enabled and len(queue_items) > 1
 
         if option == QueueOption.REPLACE:
             queue.index_in_buffer = None
             queue.ended = False
-            self._load(
-                queue_id, queue_items, keep_remaining=False, keep_played=False, shuffle=shuffle
-            )
+            queue.is_dynamic = False
+            self._load(queue_id, queue_items, keep_remaining=False, keep_played=False)
             self._play_index(queue_id, 0)
             return
         if option == QueueOption.NEXT:
-            self._load(queue_id, queue_items, insert_at_index=insert_at_index, shuffle=shuffle)
+            self._load(queue_id, queue_items, insert_at_index=insert_at_index)
             self._ensure_current_index(queue_id)
             return
         if option == QueueOption.REPLACE_NEXT:
@@ -1829,32 +1557,17 @@ class FakeMAServer:
                 queue_items,
                 insert_at_index=insert_at_index,
                 keep_remaining=False,
-                shuffle=shuffle,
             )
             self._ensure_current_index(queue_id)
             return
         if option == QueueOption.PLAY:
             play_at_index = 0 if queue.current_index is None else insert_at_index
-            self._load(queue_id, queue_items, insert_at_index=play_at_index, shuffle=shuffle)
+            self._load(queue_id, queue_items, insert_at_index=play_at_index)
             next_index = min(play_at_index, len(self.queue_items[queue_id]) - 1)
             self._play_index(queue_id, next_index)
             return
         if option == QueueOption.ADD:
-            if not queue.shuffle_enabled:
-                add_at_index = len(self.queue_items[queue_id]) + 1
-            elif queue.state in (PlaybackState.PLAYING, PlaybackState.PAUSED):
-                add_at_index = insert_at_index + 1
-            else:
-                add_at_index = insert_at_index
-            self._load(
-                queue_id,
-                queue_items,
-                insert_at_index=add_at_index,
-                shuffle=queue.shuffle_enabled,
-            )
-            if continues_ended_queue:
-                self._continue_ended_queue(queue_id, items_before_add)
-                return
+            self._load(queue_id, queue_items, insert_at_index=len(self.queue_items[queue_id]) + 1)
             self._ensure_current_index(queue_id)
             return
         raise InvalidDataError(f"Unsupported enqueue option: {option}")
@@ -1961,7 +1674,7 @@ class FakeMAServer:
             if queue.state == PlaybackState.PLAYING:
                 resume_pos = queue.corrected_elapsed_time
             else:
-                resume_pos = queue.resume_pos or self._last_played_position(queue_id)
+                resume_pos = queue.resume_pos or queue.elapsed_time
             if queue.ended and items:
                 resume_item = items[0]
                 resume_pos = 0
@@ -1974,14 +1687,6 @@ class FakeMAServer:
             if resume_item.media_type == MediaType.RADIO:
                 resume_pos = 0
             self._play_index(queue_id, resume_item.queue_item_id, int(resume_pos))
-
-    def _last_played_position(self, queue_id: str) -> float:
-        queue = self.queues[queue_id]
-        prev = self._prev_state.get(queue_id)
-        elapsed = queue.elapsed_time or 0
-        if prev and queue.current_item and prev["item"] == queue.current_item.queue_item_id:
-            return float(max(elapsed, prev["last_playing"]))
-        return float(elapsed)
 
     def _next(self, queue_id: str) -> None:
         queue = self.queues.get(queue_id)
@@ -2067,7 +1772,9 @@ class FakeMAServer:
 
     def _device_play(self, player_id: str, item: QueueItem, seek_position: float) -> None:
         player = self.players[player_id]
-        player.playback_state = PlaybackState.PLAYING
+        player.playback_state = (
+            PlaybackState.IDLE if player_id in self.dead_player_ids else PlaybackState.PLAYING
+        )
         player.active_source = player_id
         player.powered = True
         player.elapsed_time = float(seek_position)
@@ -2141,12 +1848,6 @@ class FakeMAServer:
 
     def _resolve_uri(self, uri: str) -> MediaItem:
         provider, media_type, item_id = _parse_uri(uri)
-        if provider == "library":
-            track_id = next((t for t, lib in self._library_ids.items() if lib == item_id), None)
-            if track_id is None or media_type != "track":
-                raise MediaNotFoundError(f"Item {item_id} not found")
-            instance_id, domain = self._resolve_provider("qobuz")
-            return self._make_track(instance_id, domain, track_id)
         if media_type != "track":
             raise MediaNotFoundError(f"Item {uri} not found")
         instance_id, domain = self._resolve_provider(provider)
@@ -2168,9 +1869,8 @@ class FakeMAServer:
         return key, domain
 
     def _make_track(self, instance_id: str, domain: str, track_id: str) -> Track:
-        info = self.tracks.get(track_id) or FakeTrack()
-        title = info.title or f"Track {track_id}"
-        duration = info.duration if info.duration is not None else DEFAULT_TRACK_DURATION
+        title = f"Track {track_id}"
+        duration = DEFAULT_TRACK_DURATION
         mapping = ProviderMapping(
             item_id=track_id,
             provider_domain=domain,
@@ -2194,7 +1894,7 @@ class FakeMAServer:
                     ItemMapping(
                         item_id=f"artist-{track_id}",
                         provider=provider,
-                        name=info.artist or "Test Artist",
+                        name="Test Artist",
                         media_type=MediaType.ARTIST,
                     )
                 ]
@@ -2202,7 +1902,7 @@ class FakeMAServer:
             album=ItemMapping(
                 item_id=f"album-{track_id}",
                 provider=provider,
-                name=info.album or "Test Album",
+                name="Test Album",
                 media_type=MediaType.ALBUM,
             ),
         )
@@ -2218,57 +1918,22 @@ class FakeMAServer:
             "dashboard/sessions": lambda sock: [],
             # players
             "players/all": self._cmd_players_all,
-            "players/get": self._cmd_players_get,
-            "players/cmd/stop": lambda sock, player_id: self._player_cmd(player_id, "stop"),
-            "players/cmd/play": lambda sock, player_id: self._player_cmd(player_id, "play"),
-            "players/cmd/pause": lambda sock, player_id: self._player_cmd(player_id, "pause"),
-            "players/cmd/play_pause": lambda sock, player_id: self._player_cmd(
-                player_id, "play_pause"
-            ),
-            "players/cmd/next": lambda sock, player_id: self._player_cmd(player_id, "next"),
-            "players/cmd/previous": lambda sock, player_id: self._player_cmd(player_id, "previous"),
-            "players/cmd/seek": self._cmd_player_seek,
-            "players/cmd/power": self._cmd_power,
-            "players/cmd/volume_set": self._cmd_volume_set,
-            "players/cmd/volume_up": lambda sock, player_id: self._cmd_volume_step(player_id, 1),
-            "players/cmd/volume_down": lambda sock, player_id: self._cmd_volume_step(player_id, -1),
-            "players/cmd/volume_mute": self._cmd_volume_mute,
             "players/cmd/group_volume": self._cmd_group_volume,
-            "players/cmd/set_members": self._cmd_set_members,
-            "players/cmd/select_source": self._cmd_select_source,
             # queues
             "player_queues/all": lambda sock: list(self.queues.values()),
-            "player_queues/get": lambda sock, queue_id: self.queues.get(queue_id),
             "player_queues/items": self._cmd_queue_items,
-            "player_queues/get_active_queue": self._cmd_get_active_queue,
             "player_queues/play_media": self._cmd_play_media,
             "player_queues/play_index": self._cmd_play_index,
             "player_queues/play": lambda sock, queue_id: self._handle_play(queue_id),
             "player_queues/pause": lambda sock, queue_id: self._pause(queue_id),
             "player_queues/stop": lambda sock, queue_id: self._handle_stop(queue_id),
-            "player_queues/resume": self._cmd_resume,
-            "player_queues/play_pause": self._cmd_queue_play_pause,
-            "player_queues/next": lambda sock, queue_id: self._next(queue_id),
-            "player_queues/previous": lambda sock, queue_id: self._previous(queue_id),
             "player_queues/seek": self._cmd_seek,
-            "player_queues/skip": self._cmd_skip,
             "player_queues/clear": self._cmd_clear,
             "player_queues/delete_item": self._cmd_delete_item,
-            "player_queues/move_item": self._cmd_move_item,
-            "player_queues/shuffle": self._cmd_shuffle,
             "player_queues/repeat": self._cmd_repeat,
             "player_queues/autoplay": self._cmd_autoplay,
-            "player_queues/dont_stop_the_music": self._cmd_dont_stop_the_music,
-            "player_queues/crossfade": self._cmd_crossfade,
-            # music
-            "music/item_by_uri": lambda sock, uri: self._resolve_uri(uri),
-            "music/tracks/get": self._cmd_get_track,
-            "music/item": self._cmd_get_item,
             # auth
-            "auth/me": self._cmd_auth_me,
             "auth/token/create": self._cmd_token_create,
-            "auth/tokens": self._cmd_tokens,
-            "auth/token/revoke": self._cmd_token_revoke,
             "auth/logout": self._cmd_logout,
         }
 
@@ -2283,67 +1948,6 @@ class FakeMAServer:
             result.append(player)
         return result
 
-    def _cmd_players_get(self, sock: _ServerSocket, player_id: str) -> Optional[Player]:
-        if player_id not in self.players:
-            return None
-        self._refresh_player(player_id)
-        return self.players[player_id]
-
-    def _player_cmd(self, player_id: str, action: str) -> None:
-        """``players/cmd/*``: redirected to the MA queue while it is the active source."""
-        player = self._get_player(player_id, raise_unavailable=True)
-        assert player is not None
-        queue = self.queues.get(player_id)
-        if queue is not None and queue.active and queue.current_item is not None:
-            if action == "stop":
-                self._handle_stop(player_id)
-            elif action == "play":
-                self._handle_play(player_id)
-            elif action == "pause":
-                self._pause(player_id)
-            elif action == "play_pause":
-                self._queue_play_pause(player_id)
-            elif action == "next":
-                self._next(player_id)
-            elif action == "previous":
-                self._previous(player_id)
-            return
-        # another source (or nothing) is active: act on the device only
-        if action == "stop" and player.playback_state != PlaybackState.IDLE:
-            self._device_set_state(player_id, PlaybackState.IDLE)
-        elif action == "pause" and player.playback_state == PlaybackState.PLAYING:
-            self._device_set_state(player_id, PlaybackState.PAUSED)
-        elif action == "play" and player.playback_state == PlaybackState.PAUSED:
-            self._device_set_state(player_id, PlaybackState.PLAYING)
-        elif action == "play_pause":
-            if player.playback_state == PlaybackState.PLAYING:
-                self._device_set_state(player_id, PlaybackState.PAUSED)
-            elif player.playback_state == PlaybackState.PAUSED:
-                self._device_set_state(player_id, PlaybackState.PLAYING)
-        if queue is not None:
-            self._on_player_update(player_id)
-
-    def _cmd_player_seek(self, sock: _ServerSocket, player_id: str, position: int) -> None:
-        self._get_player(player_id, raise_unavailable=True)
-        queue = self.queues.get(player_id)
-        if queue is not None and queue.active and queue.current_item is not None:
-            self._seek(player_id, position)
-            return
-        player = self.players[player_id]
-        player.elapsed_time = float(position)
-        player.elapsed_time_last_updated = time.time()
-
-    def _cmd_power(self, sock: _ServerSocket, player_id: str, powered: bool) -> None:
-        player = self._get_player(player_id, raise_unavailable=True)
-        assert player is not None
-        if not powered and player.playback_state != PlaybackState.IDLE:
-            if player_id in self.queues:
-                self._handle_stop(player_id)
-            else:
-                self._device_set_state(player_id, PlaybackState.IDLE)
-        player.powered = bool(powered)
-        self._touch(player_id)
-
     def _cmd_volume_set(self, sock: _ServerSocket, player_id: str, volume_level: int) -> None:
         player = self._get_player(player_id, raise_unavailable=True)
         assert player is not None
@@ -2352,20 +1956,6 @@ class FakeMAServer:
         ):
             raise UnsupportedFeaturedException(f"Player {player.name} does not support volume_set")
         self._set_volume(player_id, volume_level)
-
-    def _cmd_volume_step(self, player_id: str, direction: int) -> None:
-        player = self._get_player(player_id, raise_unavailable=True)
-        assert player is not None
-        current = (
-            player.group_volume if player.type == PlayerType.GROUP else player.volume_level
-        ) or 0
-        self._set_volume(player_id, current + direction * VOLUME_STEP)
-
-    def _cmd_volume_mute(self, sock: _ServerSocket, player_id: str, muted: bool) -> None:
-        player = self._get_player(player_id, raise_unavailable=True)
-        assert player is not None
-        player.volume_muted = bool(muted)
-        self._touch(player_id)
 
     def _cmd_group_volume(self, sock: _ServerSocket, player_id: str, volume_level: int) -> None:
         player = self._get_player(player_id, raise_unavailable=True)
@@ -2376,26 +1966,6 @@ class FakeMAServer:
         # not grouped: MA treats it as a normal volume change
         self._cmd_volume_set(sock, player_id, volume_level)
 
-    def _cmd_set_members(
-        self,
-        sock: _ServerSocket,
-        target_player: str,
-        player_ids_to_add: Optional[list[str]] = None,
-        player_ids_to_remove: Optional[list[str]] = None,
-    ) -> None:
-        player = self._get_player(target_player, raise_unavailable=True)
-        assert player is not None
-        members = [m for m in player.group_members if m not in (player_ids_to_remove or [])]
-        for member in player_ids_to_add or []:
-            if member not in members:
-                members.append(member)
-        player.group_members = UniqueList(members)
-        self._touch(target_player)
-
-    def _cmd_select_source(self, sock: _ServerSocket, player_id: str, source: str) -> None:
-        self._get_player(player_id, raise_unavailable=True)
-        self.switch_source(player_id, source)
-
     # queues ----------------------------------------------------------------------------
 
     def _cmd_queue_items(
@@ -2405,15 +1975,6 @@ class FakeMAServer:
         if items is None:
             return []
         return items[int(offset) : int(offset) + int(limit)]
-
-    def _cmd_get_active_queue(self, sock: _ServerSocket, player_id: str) -> Optional[PlayerQueue]:
-        player = self.players.get(player_id)
-        if player is None:
-            return None
-        for candidate in (player.active_group, player.synced_to, player.active_source):
-            if candidate and candidate in self.queues:
-                return self.queues[candidate]
-        return self.queues.get(player_id)
 
     def _cmd_play_media(
         self,
@@ -2427,7 +1988,7 @@ class FakeMAServer:
         start_from_beginning: bool = False,
         shuffle: Optional[bool] = None,
     ) -> None:
-        self._handle_play_media(queue_id, media, option, shuffle)
+        self._handle_play_media(queue_id, media, option)
 
     def _cmd_play_index(
         self,
@@ -2442,38 +2003,13 @@ class FakeMAServer:
         with self._play_action(queue_id):
             self._play_index(queue_id, index, seek_position)
 
-    def _cmd_resume(
-        self, sock: _ServerSocket, queue_id: str, fade_in: Optional[bool] = None
-    ) -> None:
-        self._resume(queue_id)
-
-    def _queue_play_pause(self, queue_id: str) -> None:
-        queue = self.queues.get(queue_id)
-        if queue is not None and queue.state == PlaybackState.PLAYING:
-            self._pause(queue_id)
-            return
-        self._handle_play(queue_id)
-
-    def _cmd_queue_play_pause(self, sock: _ServerSocket, queue_id: str) -> None:
-        self._queue_play_pause(queue_id)
-
     def _cmd_seek(self, sock: _ServerSocket, queue_id: str, position: int = 10) -> None:
         self._seek(queue_id, position)
-
-    def _cmd_skip(self, sock: _ServerSocket, queue_id: str, seconds: int = 10) -> None:
-        queue = self.queues.get(queue_id)
-        if queue is None or not queue.active:
-            raise InvalidCommand(f"Queue {queue_id} is not active")
-        self._seek(queue_id, int(queue.elapsed_time + int(seconds)))
 
     def _cmd_clear(self, sock: _ServerSocket, queue_id: str, skip_stop: bool = False) -> None:
         if queue_id not in self.queues:
             raise PlayerUnavailableError(f"Queue {queue_id} is not available")
         self._clear(queue_id, bool(skip_stop))
-        queue = self.queues[queue_id]
-        if queue.shuffle_enabled:
-            queue.shuffle_enabled = False
-            self._signal(queue_id)
 
     def _cmd_delete_item(
         self, sock: _ServerSocket, queue_id: str, item_id_or_index: Union[int, str]
@@ -2496,32 +2032,6 @@ class FakeMAServer:
         items.pop(index)
         self._update_items(queue_id, items)
 
-    def _cmd_move_item(
-        self, sock: _ServerSocket, queue_id: str, queue_item_id: str, pos_shift: int = 1
-    ) -> None:
-        queue = self.queues[queue_id]
-        item_index = self._index_by_id(queue_id, queue_item_id)
-        if item_index is None:
-            raise InvalidDataError(f"Item {queue_item_id} not found in queue")
-        boundary = committed_index(queue) if queue.index_in_buffer is not None else None
-        if boundary is not None and item_index <= boundary:
-            raise IndexError(f"{item_index} is already played/buffered")
-        items = list(self.queue_items[queue_id])
-        if pos_shift == 0 and queue.state in (PlaybackState.PLAYING, PlaybackState.PAUSED):
-            new_index = (boundary if boundary is not None else 0) + 1
-        elif pos_shift == 0:
-            new_index = queue.current_index or 0
-        else:
-            new_index = item_index + int(pos_shift)
-        lowest = boundary + 1 if boundary is not None else (queue.current_index or 0)
-        if new_index < lowest or new_index > len(items):
-            return
-        items.insert(new_index, items.pop(item_index))
-        self._update_items(queue_id, items)
-
-    def _cmd_shuffle(self, sock: _ServerSocket, queue_id: str, shuffle_enabled: bool) -> None:
-        self._set_shuffle(queue_id, bool(shuffle_enabled))
-
     def _cmd_repeat(self, sock: _ServerSocket, queue_id: str, repeat_mode: str) -> None:
         queue = self.queues[queue_id]
         mode = RepeatMode(repeat_mode)
@@ -2537,40 +2047,7 @@ class FakeMAServer:
         queue.autoplay_enabled = bool(autoplay_enabled)
         self._signal(queue_id)
 
-    def _cmd_dont_stop_the_music(
-        self, sock: _ServerSocket, queue_id: str, dont_stop_the_music_enabled: bool
-    ) -> None:
-        self._cmd_autoplay(sock, queue_id, dont_stop_the_music_enabled)
-
-    def _cmd_crossfade(self, sock: _ServerSocket, queue_id: str, crossfade_enabled: bool) -> None:
-        queue = self.queues[queue_id]
-        queue.crossfade_enabled = bool(crossfade_enabled)
-        self._signal(queue_id)
-
-    # music -----------------------------------------------------------------------------
-
-    def _cmd_get_track(
-        self,
-        sock: _ServerSocket,
-        item_id: str,
-        provider_instance_id_or_domain: str,
-        album_uri: Optional[str] = None,
-    ) -> MediaItem:
-        return self._resolve_uri(f"{provider_instance_id_or_domain}://track/{item_id}")
-
-    def _cmd_get_item(
-        self,
-        sock: _ServerSocket,
-        media_type: str,
-        item_id: str,
-        provider_instance_id_or_domain: str,
-    ) -> MediaItem:
-        return self._resolve_uri(f"{provider_instance_id_or_domain}://{media_type}/{item_id}")
-
     # auth ------------------------------------------------------------------------------
-
-    def _cmd_auth_me(self, sock: _ServerSocket) -> User:
-        return self._user(sock.username or "admin")
 
     def _cmd_token_create(
         self, sock: _ServerSocket, name: str, user_id: Optional[str] = None
@@ -2582,28 +2059,6 @@ class FakeMAServer:
         token = f"fake-long-lived-token-{self._token_seq}"
         self._register_token(token, username, name, long_lived=True)
         return token
-
-    def _cmd_tokens(self, sock: _ServerSocket, user_id: Optional[str] = None) -> list[AuthToken]:
-        username = sock.username or "admin"
-        return [
-            AuthToken(
-                token_id=info.token_id,
-                user_id=f"user-{info.username}",
-                token_hash=f"hash-{info.token_id}",
-                name=info.name,
-                is_long_lived=info.long_lived,
-            )
-            for info in self._tokens.values()
-            if info.username == username
-        ]
-
-    def _cmd_token_revoke(self, sock: _ServerSocket, token_id: str) -> None:
-        for token, info in list(self._tokens.items()):
-            if info.token_id == token_id:
-                # MA disconnects the token's sockets right away; answer this command first
-                asyncio.get_running_loop().call_soon(self.revoke_token, token)
-                return
-        raise InvalidDataError(f"Token {token_id} not found")
 
     def _cmd_logout(self, sock: _ServerSocket) -> None:
         if sock.token is not None:
@@ -2625,13 +2080,6 @@ def _exception_frame(message_id: Any, err: BaseException) -> dict[str, Any]:
 
 def _parse_uri(uri: str) -> tuple[str, str, str]:
     """``(provider, media_type, item_id)`` like MA's ``parse_uri`` (InvalidProviderURI)."""
-    if uri.startswith(("http://", "https://")):
-        parsed = urlparse(uri)
-        host_parts = (parsed.hostname or "").split(".")
-        path_parts = [p for p in parsed.path.split("/") if p]
-        if len(host_parts) >= 2 and len(path_parts) >= 2:
-            return host_parts[-2], path_parts[-2], path_parts[-1]
-        raise InvalidProviderURI(f"Not a valid Music Assistant uri: {uri}")
     if "://" not in uri:
         raise InvalidProviderURI(f"Not a valid Music Assistant uri: {uri}")
     provider, rest = uri.split("://", 1)
@@ -2651,21 +2099,3 @@ def _item_track_id(item: QueueItem) -> Optional[str]:
             return str(mapping.item_id)
         return None
     return str(media_item.item_id)
-
-
-def _shift_wire_anchor(data: Any, seconds: float) -> None:
-    """Move a queued (not yet delivered) queue/player dict's time anchor back by ``seconds``."""
-    if not isinstance(data, dict):
-        return
-    state = data.get("state") or data.get("playback_state")
-    if state != PlaybackState.PLAYING.value:
-        return
-    if isinstance(data.get("elapsed_time_last_updated"), (int, float)):
-        data["elapsed_time_last_updated"] -= seconds
-    media = data.get("current_media")
-    if isinstance(media, dict) and isinstance(media.get("elapsed_time_last_updated"), (int, float)):
-        media["elapsed_time_last_updated"] -= seconds
-
-
-# Schema the real client speaks (connect() refuses servers whose minimum is higher).
-CLIENT_SCHEMA_VERSION = API_SCHEMA_VERSION
