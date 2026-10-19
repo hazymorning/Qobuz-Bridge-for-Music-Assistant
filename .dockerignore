@@ -57,9 +57,6 @@ planning/
 *.md
 !README.md
 
-# Claude
-.claude/
-
 # macOS
 .DS_Store
 

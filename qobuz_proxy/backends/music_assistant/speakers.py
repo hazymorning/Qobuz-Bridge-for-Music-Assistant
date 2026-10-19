@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 NAME_SUFFIX = " (MA)"
 FIRST_PORT = 8700  # clear of the main web port (8689) and config.yaml speakers (8690+)
-UPDATE_DELAY_SECONDS = 1.0  # MA sends player events in bursts
+UPDATE_DELAY_SECONDS = 1.0
 # MA re-registers players slowly after a restart; don't drop their speakers for that.
 MISSING_PLAYER_GRACE_SECONDS = 1800.0
 START_RETRY_DELAYS_SECONDS = (10.0, 30.0, 60.0, 300.0)
@@ -112,7 +112,7 @@ class MusicAssistantSpeakers:
             self._settings.url, self._settings.token, **extra
         )
         self._connection.add_status_listener(lambda _status: self._update_speakers_soon())
-        self._connection.add_event_listener(None, self._on_ma_event)
+        self._connection.add_event_listener(None, self._on_event)
         if self._settings.is_configured:
             logger.info(f"Connecting to Music Assistant at {self._settings.url}")
         else:
@@ -129,16 +129,16 @@ class MusicAssistantSpeakers:
         if self._connection is not None:
             await self._connection.stop()
 
-    async def set_qobuz_logged_in(self, ready: bool, restart: bool = False) -> None:
+    async def set_qobuz_logged_in(self, logged_in: bool, restart: bool = False) -> None:
         """Start the speakers once Qobuz is logged in, stop them on logout.
 
         ``restart`` builds them again, e.g. after a new Qobuz login replaced
         the API client they use.
         """
-        self._is_qobuz_logged_in = ready
-        if not ready or restart:
+        self._is_qobuz_logged_in = logged_in
+        if not logged_in or restart:
             await self._stop_all_speakers()
-        if ready:
+        if logged_in:
             await self.update_speakers()
 
     async def connect(self, url: str, username: str, password: str) -> None:
@@ -196,34 +196,46 @@ class MusicAssistantSpeakers:
 
     def status(self) -> dict[str, Any]:
         """What the web UI shows; never the token."""
-        conn = self._connection.status if self._connection is not None else None
         live = self._update_known_players()
         wanted = self._wanted_speakers() if self._settings.is_configured else {}
         known = self._settings.known_players
         return {
             "is_configured": self._settings.is_configured,
             "connection": {
-                "state": conn.state.value if conn else "not_configured",
-                "message": conn.message if conn else self._unsupported_reason,
-                "server_version": conn.server_version if conn else "",
-                "has_qobuz_provider": conn.has_qobuz_provider if conn else False,
+                **self._connection_status(),
                 "url": self._settings.url or DEFAULT_URL,
                 "username": self._settings.username,
             },
             "expose_all": self._settings.expose_all,
             "players": [
                 {
-                    "player_id": pid,
+                    "player_id": player_id,
                     "name": p.name,
                     "type": p.player_type,
-                    "available": live.get(pid, False),
+                    "available": live.get(player_id, False),
                     "hidden": p.hidden,
-                    "selected": pid in self._settings.selected_player_ids,
-                    "speaker_name": wanted[pid].name if pid in wanted else "",
+                    "selected": player_id in self._settings.selected_player_ids,
+                    "speaker_name": wanted[player_id].name if player_id in wanted else "",
                 }
-                for pid, p in sorted(known.items(), key=lambda kv: kv[1].name.lower())
+                for player_id, p in sorted(known.items(), key=lambda kv: kv[1].name.lower())
             ],
             "speaker_count": len(self._speakers),
+        }
+
+    def _connection_status(self) -> dict[str, Any]:
+        if self._connection is None:
+            return {
+                "state": "not_configured",
+                "message": self._unsupported_reason,
+                "server_version": "",
+                "has_qobuz_provider": False,
+            }
+        status = self._connection.status
+        return {
+            "state": status.state.value,
+            "message": status.message,
+            "server_version": status.server_version,
+            "has_qobuz_provider": status.has_qobuz_provider,
         }
 
     async def update_speakers(self) -> None:
@@ -233,28 +245,32 @@ class MusicAssistantSpeakers:
             ready = self._is_qobuz_logged_in and self._settings.is_configured and self._connection
             wanted = self._wanted_speakers() if ready else {}
 
-            for pid, running in list(self._running_configs.items()):
-                want = wanted.get(pid)
+            for player_id, running in list(self._running_configs.items()):
+                want = wanted.get(player_id)
                 if want is not None and (want.name, want.http_port) == (
                     running.name,
                     running.http_port,
                 ):
                     continue
-                if want is not None and self._is_playing(pid):
+                if want is not None and self._is_playing(player_id):
                     continue  # a rename restarts the speaker: wait until it is idle
-                await self._stop_speaker(pid)
-            for pid in list(self._retry_tasks):
-                if pid not in wanted:
-                    self._retry_tasks.pop(pid).cancel()
+                await self._stop_speaker(player_id)
+            for player_id in list(self._retry_tasks):
+                if player_id not in wanted:
+                    self._retry_tasks.pop(player_id).cancel()
 
             new = [
-                pid for pid in wanted if pid not in self._speakers and pid not in self._retry_tasks
+                player_id
+                for player_id in wanted
+                if player_id not in self._speakers and player_id not in self._retry_tasks
             ]
-            started = await asyncio.gather(*(self._start_speaker(pid, wanted[pid]) for pid in new))
-            for pid, ok in zip(new, started):
+            started = await asyncio.gather(
+                *(self._start_speaker(player_id, wanted[player_id]) for player_id in new)
+            )
+            for player_id, ok in zip(new, started):
                 if not ok:
-                    self._retry_tasks[pid] = asyncio.create_task(
-                        self._retry_start(pid, wanted[pid])
+                    self._retry_tasks[player_id] = asyncio.create_task(
+                        self._retry_start(player_id, wanted[player_id])
                     )
 
             names = sorted(c.name for c in wanted.values())
@@ -267,7 +283,7 @@ class MusicAssistantSpeakers:
                 )
 
     def _update_speakers_soon(self) -> None:
-        """Reconcile once soon; later events before then ride along."""
+        """Update the speakers once, soon; MA sends player events in bursts."""
         if self._update_timer is not None:
             return
 
@@ -277,7 +293,7 @@ class MusicAssistantSpeakers:
 
         self._update_timer = asyncio.get_running_loop().call_later(UPDATE_DELAY_SECONDS, run)
 
-    def _on_ma_event(self, event: Any) -> None:
+    def _on_event(self, event: Any) -> None:
         if event.event.value in PLAYER_EVENTS:
             self._update_speakers_soon()
 
@@ -288,54 +304,58 @@ class MusicAssistantSpeakers:
         known = self._settings.known_players
         live = {p.player_id: p for p in self._connection.players()}
         changed = False
-        for pid, p in live.items():
-            self._missing_since.pop(pid, None)
+        for player_id, p in live.items():
+            self._missing_since.pop(player_id, None)
             entry = KnownPlayer(p.name, p.type, 0, p.hidden)
-            if pid not in known:
+            if player_id not in known:
                 entry.http_port = self._free_port()
-                known[pid] = entry
+                known[player_id] = entry
                 changed = True
-            elif (known[pid].name, known[pid].player_type, known[pid].hidden) != (
+            elif (known[player_id].name, known[player_id].player_type, known[player_id].hidden) != (
                 entry.name,
                 entry.player_type,
                 entry.hidden,
             ):
-                entry.http_port = known[pid].http_port
-                known[pid] = entry
+                entry.http_port = known[player_id].http_port
+                known[player_id] = entry
                 changed = True
         now = time.monotonic()
-        for pid in [pid for pid in known if pid not in live]:
-            if now - self._missing_since.setdefault(pid, now) > MISSING_PLAYER_GRACE_SECONDS:
-                logger.info(f"Music Assistant player {known[pid].name} is gone; forgetting it")
-                del known[pid]
-                del self._missing_since[pid]
-                self._settings.sessions.pop(pid, None)
+        for player_id in [player_id for player_id in known if player_id not in live]:
+            if now - self._missing_since.setdefault(player_id, now) > MISSING_PLAYER_GRACE_SECONDS:
+                logger.info(
+                    f"Music Assistant player {known[player_id].name} is gone; forgetting it"
+                )
+                del known[player_id]
+                del self._missing_since[player_id]
+                self._settings.sessions.pop(player_id, None)
                 changed = True
         if changed:
             self._save()
-        return {pid: p.available for pid, p in live.items()}
+        return {player_id: p.available for player_id, p in live.items()}
 
     def _wanted_speakers(self) -> dict[str, SpeakerConfig]:
         """Speaker configs for the players to expose, with unique names."""
         known = self._settings.known_players
         if self._settings.expose_all:
-            exposed = [pid for pid, p in known.items() if not p.hidden]
+            exposed = [player_id for player_id, p in known.items() if not p.hidden]
         else:
-            exposed = [pid for pid in self._settings.selected_player_ids if pid in known]
+            exposed = [
+                player_id for player_id in self._settings.selected_player_ids if player_id in known
+            ]
         used: set[str] = set()
         configs = {}
-        for pid in sorted(exposed):
-            base = known[pid].name + NAME_SUFFIX
+        for player_id in sorted(exposed):
+            base = known[player_id].name + NAME_SUFFIX
             name, n = base, 2
             while slugify_name(name) in used:
                 name, n = f"{base} {n}", n + 1
             used.add(slugify_name(name))
-            configs[pid] = SpeakerConfig(
+            configs[player_id] = SpeakerConfig(
                 name=name,
-                uuid=speaker_uuid(pid),
+                uuid=speaker_uuid(player_id),
                 backend_type="music_assistant",
                 max_quality=27,  # MA streams with its own quality; this only checks availability
-                http_port=known[pid].http_port,
+                http_port=known[player_id].http_port,
                 bind_address=self._bind_address,
             )
         return configs
@@ -347,24 +367,24 @@ class MusicAssistantSpeakers:
             port += 1
         return port
 
-    async def _start_speaker(self, pid: str, config: SpeakerConfig) -> bool:
+    async def _start_speaker(self, player_id: str, config: SpeakerConfig) -> bool:
         from .backend import MusicAssistantBackend
 
         backend = MusicAssistantBackend(
             self._connection,
-            pid,
+            player_id,
             config.name,
-            session=self._settings.sessions.get(pid),
-            save_session=lambda session: self._save_session(pid, session),
+            session=self._settings.sessions.get(player_id),
+            save_session=lambda session: self._save_session(player_id, session),
         )
         speaker = self._make_speaker(config, backend)
         if not await speaker.start():
             return False
-        self._speakers[pid] = speaker
-        self._running_configs[pid] = config
+        self._speakers[player_id] = speaker
+        self._running_configs[player_id] = config
         return True
 
-    async def _retry_start(self, pid: str, config: SpeakerConfig) -> None:
+    async def _retry_start(self, player_id: str, config: SpeakerConfig) -> None:
         """Keep trying to start a speaker that failed to start (e.g. its port was taken)."""
         try:
             for attempt in itertools.count():
@@ -374,36 +394,36 @@ class MusicAssistantSpeakers:
                 logger.info(f"[{config.name}] Retrying in {delay:.0f}s")
                 await asyncio.sleep(delay)
                 async with self._lock:
-                    if await self._start_speaker(pid, config):
+                    if await self._start_speaker(player_id, config):
                         return
         finally:
-            if self._retry_tasks.get(pid) is asyncio.current_task():
-                del self._retry_tasks[pid]
+            if self._retry_tasks.get(player_id) is asyncio.current_task():
+                del self._retry_tasks[player_id]
 
-    def _is_playing(self, pid: str) -> bool:
-        return self._speakers[pid].get_status()["status"] in ("playing", "paused")
+    def _is_playing(self, player_id: str) -> bool:
+        return self._speakers[player_id].get_status()["status"] in ("playing", "paused")
 
-    async def _stop_speaker(self, pid: str) -> None:
-        self._running_configs.pop(pid)
-        await self._speakers.pop(pid).stop()
+    async def _stop_speaker(self, player_id: str) -> None:
+        self._running_configs.pop(player_id)
+        await self._speakers.pop(player_id).stop()
 
     async def _stop_all_speakers(self) -> None:
         async with self._lock:
             for task in self._retry_tasks.values():
                 task.cancel()
             self._retry_tasks.clear()
-            for pid in list(self._speakers):
-                await self._stop_speaker(pid)
+            for player_id in list(self._speakers):
+                await self._stop_speaker(player_id)
             self._logged_speaker_names = []
 
-    def _save_session(self, pid: str, session: Optional[dict[str, Any]]) -> None:
+    def _save_session(self, player_id: str, session: Optional[dict[str, Any]]) -> None:
         sessions = self._settings.sessions
-        if sessions.get(pid) == session:
+        if sessions.get(player_id) == session:
             return
         if session is None:
-            del sessions[pid]
+            del sessions[player_id]
         else:
-            sessions[pid] = session
+            sessions[player_id] = session
         self._save()
 
     def _save(self) -> None:

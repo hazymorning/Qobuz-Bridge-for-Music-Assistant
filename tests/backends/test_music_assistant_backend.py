@@ -26,8 +26,6 @@ from qobuz_proxy.backends.music_assistant.connection import NotConnectedError  #
 from qobuz_proxy.backends.types import PlaybackState  # noqa: E402
 from tests.backends.conftest import NOTHING_FIRED, QID, STREAM_URL, Rig, meta  # noqa: E402
 
-# ----------------------------------------------------------------------------- basics
-
 
 class TestBasics:
     async def test_nothing_played_reads_stopped_without_calling_ma(self, rig: Rig) -> None:
@@ -68,9 +66,6 @@ class TestBasics:
 
         assert rig.server.writes == writes
         assert await rig.backend.get_state() == PlaybackState.STOPPED
-
-
-# ------------------------------------------------------------------------------- play
 
 
 class TestPlay:
@@ -186,9 +181,6 @@ class TestPlay:
         assert await rig.backend.get_state() == PlaybackState.PLAYING
 
 
-# ------------------------------------------------------------------------ pause/resume
-
-
 class TestPauseResume:
     async def test_pause_and_resume(self, rig: Rig) -> None:
         await rig.play("101")
@@ -264,9 +256,6 @@ class TestPauseResume:
     async def test_resume_with_nothing_played_returns_false(self, rig: Rig) -> None:
         assert await rig.backend.resume() is False
         assert rig.server.writes == []
-
-
-# -------------------------------------------------------------------------------- stop
 
 
 class TestStop:
@@ -373,9 +362,6 @@ class TestStop:
         assert rig.server.track_ids(QID) == ["102"]
 
 
-# -------------------------------------------------------------------------------- seek
-
-
 class TestSeek:
     async def test_seek_sends_whole_seconds(self, rig: Rig) -> None:
         await rig.play("101")
@@ -412,9 +398,6 @@ class TestSeek:
         with pytest.raises(RuntimeError, match="not playing this Qobuz track"):
             await rig.backend.seek(50_000)
         assert rig.calls("player_queues/seek") == []
-
-
-# ------------------------------------------------------------------------------ volume
 
 
 class TestVolume:
@@ -503,9 +486,6 @@ class TestVolume:
         rig.cb.volume.assert_called_once_with(50)
 
 
-# ---------------------------------------------------------------------- session set-up
-
-
 class TestSessionSetup:
     async def test_repeat_and_autoplay_are_turned_off_after_the_first_play_media(
         self, rig: Rig
@@ -563,9 +543,6 @@ class TestSessionSetup:
         assert len(rig.calls("player_queues/repeat")) == 1
         assert len(rig.calls("player_queues/autoplay")) == 1
         assert await rig.backend.get_state() == PlaybackState.PLAYING
-
-
-# ----------------------------------------------------------------------------- gapless
 
 
 class TestGapless:

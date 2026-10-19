@@ -121,9 +121,6 @@ class RecordedDelays(tuple):  # type: ignore[type-arg]
         return 0.001
 
 
-# ----------------------------------------------------------------------------- connect
-
-
 class TestConnect:
     async def test_connects_and_reports_version_and_qobuz_provider(
         self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
@@ -200,9 +197,6 @@ class TestConnect:
         assert server.created_clients == []
         assert not conn.is_connected
         await conn.stop()
-
-
-# --------------------------------------------------------------------------- reconnect
 
 
 class TestReconnect:
@@ -300,9 +294,6 @@ class TestReconnect:
         await wait_for(lambda: conn.is_connected, server)
 
 
-# -------------------------------------------------------------------------------- auth
-
-
 class TestAuth:
     async def test_revoked_token_stops_retrying(
         self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
@@ -368,9 +359,6 @@ class TestAuth:
             await wait_for(lambda: conn.status.state == ConnectionState.AUTH_FAILED, server)
         assert caplog.text
         assert server.token not in caplog.text
-
-
-# -------------------------------------------------------------------------------- call()
 
 
 class TestCall:
@@ -485,9 +473,6 @@ class TestCall:
         assert server.clients == [client]
 
 
-# --------------------------------------------------------------------------- listeners
-
-
 class TestListeners:
     async def test_event_listeners_per_object_and_global(
         self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
@@ -584,9 +569,6 @@ class TestListeners:
         assert seen[-1] == ConnectionState.CONNECTED
 
 
-# --------------------------------------------------------------------------- lifecycle
-
-
 class TestLifecycle:
     async def test_stop_is_idempotent_and_stops_reconnecting(
         self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
@@ -633,9 +615,6 @@ class TestLifecycle:
         client = server.clients[0]
         assert client.server_url == "http://ma.local:8095"
         assert client.connection.auth_token == "second-token"
-
-
-# ------------------------------------------------------------------------ login helper
 
 
 class TestLoginAndCreateToken:

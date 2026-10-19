@@ -161,9 +161,6 @@ class _TokenInfo:
     long_lived: bool
 
 
-# --------------------------------------------------------------------------------------- transport
-
-
 class _ServerSocket:
     """Server side of one websocket connection: the queue of frames waiting for the client."""
 
@@ -302,9 +299,6 @@ class FakeWebsocketsConnection:
         self._socket.from_client(_wire(message))
 
 
-# ------------------------------------------------------------------------------------------ client
-
-
 class FakeMusicAssistantClient(MusicAssistantClient):
     """The real ``MusicAssistantClient`` wired to a :class:`FakeMusicAssistantServer`.
 
@@ -338,9 +332,6 @@ class FakeMusicAssistantClient(MusicAssistantClient):
         self.connection = connection  # type: ignore[assignment]
         self.fake_server = server
         server.created_clients.append(self)
-
-
-# ------------------------------------------------------------------------------------------ server
 
 
 class FakeMusicAssistantServer:
@@ -430,8 +421,6 @@ class FakeMusicAssistantServer:
         if token:
             self._register_token(token, "admin", "Qobuz Bridge", long_lived=True)
 
-    # ------------------------------------------------------------------------- client plumbing
-
     @property
     def client_class(self) -> type[FakeMusicAssistantClient]:
         """``MusicAssistantClient`` replacement bound to this server (real signature)."""
@@ -510,8 +499,6 @@ class FakeMusicAssistantServer:
         gate = self._gates.pop(command, None)
         if gate is not None:
             gate.set()
-
-    # ----------------------------------------------------------------------------- build state
 
     def add_player(
         self,
@@ -646,8 +633,6 @@ class FakeMusicAssistantServer:
         self._emit(EventType.PROVIDERS_UPDATED, None, list(self.providers))
         return provider
 
-    # --------------------------------------------------------------------------- inspection
-
     def queue(self, queue_id: str) -> PlayerQueue:
         """Server-side queue (live object)."""
         return self.queues[queue_id]
@@ -673,8 +658,6 @@ class FakeMusicAssistantServer:
         """Forget ``command_log`` and ``events``."""
         self.command_log.clear()
         self.events.clear()
-
-    # ------------------------------------------------------------------------ scenario hooks
 
     def start_playing(
         self,
@@ -1017,8 +1000,6 @@ class FakeMusicAssistantServer:
             if sock.token == token:
                 sock.close(graceful=True)
 
-    # ------------------------------------------------------------- login helpers (HTTP API)
-
     async def login(
         self,
         server_url: str,
@@ -1047,8 +1028,6 @@ class FakeMusicAssistantServer:
                 "[Connect call failed]"
             )
             raise CannotConnect(err) from err
-
-    # ------------------------------------------------------------------- websocket plumbing
 
     def _all_live_sockets(self) -> list[_ServerSocket]:
         """Sockets whose client may still read frames (open, or closed but not yet read)."""
@@ -1200,8 +1179,6 @@ class FakeMusicAssistantServer:
         role = "guest" if username in self.guest_users else "admin"
         return User(user_id=f"user-{username}", username=username, role=role)
 
-    # -------------------------------------------------------------------------- events
-
     @contextmanager
     def _operation(self, flush: bool = True) -> Iterator[None]:
         """Group state changes; PLAYER_UPDATED is coalesced and emitted when the group ends."""
@@ -1283,8 +1260,6 @@ class FakeMusicAssistantServer:
             self._emit(EventType.QUEUE_ITEMS_UPDATED, queue_id, queue)
         self._emit(EventType.QUEUE_UPDATED, queue_id, queue)
         self._touch(queue_id)
-
-    # ------------------------------------------------------------------- queue engine
 
     @contextmanager
     def _play_action(self, queue_id: str) -> Iterator[None]:
@@ -1763,8 +1738,6 @@ class FakeMusicAssistantServer:
         with self._play_action(queue_id):
             self._play_index(queue_id, queue.current_index, seek_position=position)
 
-    # ------------------------------------------------------------------ device (the player)
-
     def _get_player(self, player_id: str, raise_unavailable: bool = False) -> Optional[Player]:
         player = self.players.get(player_id)
         if player is None or not player.available or not player.enabled:
@@ -1824,8 +1797,6 @@ class FakeMusicAssistantServer:
                 member.volume_level = level
                 member.group_volume = level
                 self._touch(member_id)
-
-    # ------------------------------------------------------------------ media resolution
 
     def _new_item_id(self) -> str:
         self._item_seq += 1
@@ -1908,8 +1879,6 @@ class FakeMusicAssistantServer:
                 media_type=MediaType.ALBUM,
             ),
         )
-
-    # -------------------------------------------------------------------- command table
 
     def _build_command_table(self) -> dict[str, Callable[..., Any]]:
         return {
@@ -2065,9 +2034,6 @@ class FakeMusicAssistantServer:
     def _cmd_logout(self, sock: _ServerSocket) -> None:
         if sock.token is not None:
             asyncio.get_running_loop().call_soon(self.revoke_token, sock.token)
-
-
-# ------------------------------------------------------------------------------------- helpers
 
 
 def _error_frame(message_id: Any, error_code: int, details: str) -> dict[str, Any]:

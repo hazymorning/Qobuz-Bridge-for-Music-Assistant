@@ -192,11 +192,6 @@ def players_by_id(status: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {p["player_id"]: p for p in status["players"]}
 
 
-# =============================================================================
-# Which players are shared
-# =============================================================================
-
-
 class TestExposure:
     async def test_expose_all_shares_players_groups_and_stereo_pairs(self, h):
         h.configure()
@@ -269,11 +264,6 @@ class TestExposure:
         await h.all_started()
 
 
-# =============================================================================
-# Stable identity: UUIDs and discovery ports
-# =============================================================================
-
-
 class TestIdentity:
     async def test_uuid_comes_from_the_player_id_and_survives_a_rename(self, h, server):
         h.configure()
@@ -344,11 +334,6 @@ class TestIdentity:
         assert h.saved().sessions == {}
 
 
-# =============================================================================
-# Music Assistant offline, players coming and going
-# =============================================================================
-
-
 class TestOffline:
     async def test_known_players_are_shared_while_ma_is_down(self, h, server):
         server.reachable = False
@@ -396,11 +381,6 @@ class TestOffline:
         saved = h.saved()
         assert "pair" not in saved.known_players and "pair" not in saved.sessions
         assert "pair" not in players_by_id(music_assistant.status())
-
-
-# =============================================================================
-# Speaker lifecycle
-# =============================================================================
 
 
 class TestLifecycle:
@@ -467,11 +447,6 @@ class TestLifecycle:
         assert h.factory.starts("up1") == 3  # two failures, then success
         assert len([s for s in h.factory.created if s.player_id == "up1"]) == 3
         assert music_assistant.status()["speaker_count"] == 3
-
-
-# =============================================================================
-# Connecting to Music Assistant from the web UI
-# =============================================================================
 
 
 class TestConnect:
@@ -548,11 +523,6 @@ class TestConnect:
         assert music_assistant.connection.status.state == ConnectionState.NOT_CONFIGURED
         status = music_assistant.status()
         assert status["is_configured"] is False and status["speaker_count"] == 0
-
-
-# =============================================================================
-# status()
-# =============================================================================
 
 
 class TestStatus:

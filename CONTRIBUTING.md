@@ -93,23 +93,6 @@ make sure your change does not add new ones.
 New behavior comes with tests. Changed behavior comes with changed tests.
 Tests live under `tests/` mirroring the source tree.
 
-## Using AI tools
-
-**You are welcome to use AI coding tools.** Most of this project was written
-with them! Two things to keep in mind:
-
-1. **Disclose it.** Add a line to the PR description saying which tool was
-   used and roughly how much of the change it produced. This is not a
-   judgment; it tells the reviewer where to look harder.
-2. **You are the author.** You must be able to explain why each change is there, and
-   have run the result on real hardware.
-
-AI tools are especially prone to the problems this document is about: they
-happily bump versions, fix nearby unrelated things, add defensive code that
-was never needed, and write long confident descriptions of changes that were
-not actually verified. Review the output with that in mind before you submit
-it.
-
 ## Review
 
 Expect a few questions, and possibly a request to split things up. Reviews can take a while since testing

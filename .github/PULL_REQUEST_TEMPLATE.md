@@ -23,7 +23,3 @@ Fixes #
 
 <!-- If you couldn't test on hardware, that's okay, just leave the box unchecked and say why. -->
 
-## AI tools
-
-<!-- Did you use an AI coding tool? Which one, with which model?
-     Writing all the code with AI is a perfectly fine answer. Either way, you've read and run the result yourself. -->

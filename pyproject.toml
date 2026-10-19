@@ -65,7 +65,7 @@ dev = [
 [project.scripts]
 qobuz-proxy = "qobuz_proxy.cli:main"
 
-# uv manages the local environment (.venv + uv.lock). See .claude/CLAUDE.md.
+# uv manages the local environment (.venv + uv.lock).
 [tool.uv]
 package = true                 # build & install this project (editable) into the env
 default-groups = ["dev"]       # `uv sync` includes the dev group unless --no-dev

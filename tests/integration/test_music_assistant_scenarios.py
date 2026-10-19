@@ -86,11 +86,6 @@ def fast_timers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(connection_module, "RECONNECT_DELAYS_SECONDS", (0.02,))
 
 
-# =============================================================================
-# Fakes for the Qobuz side
-# =============================================================================
-
-
 class StubMetadata:
     """Qobuz track API: a URL and metadata per track id; blocked tracks get neither."""
 
@@ -285,11 +280,6 @@ def make_tokens() -> ConnectTokens:
     )
 
 
-# =============================================================================
-# Rig
-# =============================================================================
-
-
 class Rig:
     """One exposed MA player as a Qobuz Connect device, wired like production."""
 
@@ -321,8 +311,6 @@ class Rig:
     def _make_discovery(self, *args: Any, **kwargs: Any) -> StubDiscovery:
         self.discovery = StubDiscovery(*args, **kwargs)
         return self.discovery
-
-    # -- lifecycle ------------------------------------------------------------
 
     async def start(self, *, wait_for_ma: bool = True) -> Rig:
         self.conn = MusicAssistantConnection(
@@ -382,8 +370,6 @@ class Rig:
     def ws(self) -> Any:
         assert self.speaker is not None and self.speaker._ws_manager is not None
         return self.speaker._ws_manager
-
-    # -- Qobuz app -> renderer -------------------------------------------------
 
     def _track_handlers(self) -> None:
         """Keep the tasks the handlers spawn, so deliver() can wait for them."""
@@ -471,8 +457,6 @@ class Rig:
             f"next track {track_id} queued in MA",
         )
 
-    # -- what the Qobuz app shows ----------------------------------------------
-
     def app(self) -> tuple[int, int]:
         """(playing state, current queue item id) of the last report the app got."""
         assert self.cloud.reports, "the app got no state report"
@@ -481,8 +465,6 @@ class Rig:
 
     def app_position(self) -> int:
         return int(self.cloud.reports[-1].currentPosition.value)
-
-    # -- what Music Assistant does ---------------------------------------------
 
     def queue_track(self) -> Optional[str]:
         queue = self.server.queue(self.player_id)
@@ -566,11 +548,6 @@ def assert_no_backend_errors(caplog: pytest.LogCaptureFixture) -> None:
     assert not errors, [r.getMessage() for r in errors]
 
 
-# =============================================================================
-# 1. Album start
-# =============================================================================
-
-
 class TestAlbumStart:
     async def test_play_replaces_ma_queue_reports_playing_and_queues_next_gaplessly(self, rig):
         await rig.play_album(0)
@@ -585,11 +562,6 @@ class TestAlbumStart:
         # Gapless: MA itself hands the next item to the speaker, the proxy sends no stop/play
         assert "player_queues/stop" not in rig.writes()
         assert "player_queues/play_index" not in rig.writes()
-
-
-# =============================================================================
-# 2. Album plays to the end without gaps or repeats
-# =============================================================================
 
 
 class TestAlbumToTheEnd:
@@ -628,11 +600,6 @@ class TestAlbumToTheEnd:
             rig.writes()
         )
         assert rig.queue_state() == MusicAssistantState.IDLE
-
-
-# =============================================================================
-# 3. Commands from the Qobuz app reach Music Assistant
-# =============================================================================
 
 
 class TestAppCommands:
@@ -699,11 +666,6 @@ class TestAppCommands:
         )
         assert rig.plays()[0] == ("replace", [uri("101")])
         assert rig.server.track_ids(PID)[0] == "101"
-
-
-# =============================================================================
-# 4. Pause / resume / skip in Music Assistant's UI show in the Qobuz app
-# =============================================================================
 
 
 class TestMAUserInterface:
@@ -802,11 +764,6 @@ class TestMAUserInterface:
         assert not rig.ws._external_playback
 
 
-# =============================================================================
-# 5. Someone plays something else in Music Assistant
-# =============================================================================
-
-
 async def take_over(rig: Rig) -> None:
     await rig.play_album(0)
     await rig.wait_armed("102")
@@ -861,11 +818,6 @@ class TestTakeoverInMA:
         assert rig.ws.is_renderer_active
 
 
-# =============================================================================
-# 6. End of the Qobuz queue
-# =============================================================================
-
-
 class TestEndOfQueue:
     async def test_last_track_ends_stopped_and_ma_is_left_alone(self, rig):
         await rig.play_album(2)  # the album's last track: no next
@@ -895,11 +847,6 @@ class TestEndOfQueue:
         await rig.wait_for(lambda: rig.app()[0] == APP_STOPPED, "app shows stopped")
         assert rig.server.track_ids(PID) == ["103"]
         assert rig.queue_state() == MusicAssistantState.IDLE
-
-
-# =============================================================================
-# 7. Tracks that can't be played are skipped
-# =============================================================================
 
 
 class TestUnavailableTracks:
@@ -941,11 +888,6 @@ class TestUnavailableTracks:
         assert ACTION_NEXT in rig.cloud.actions
         assert "102" not in rig.server.track_ids(PID)
         assert rig.player.state == PlaybackState.PLAYING
-
-
-# =============================================================================
-# 8. A Music Assistant group as the Qobuz Connect device
-# =============================================================================
 
 
 @pytest.fixture
@@ -995,11 +937,6 @@ class TestGroupPlayer:
             await rig.close()
 
 
-# =============================================================================
-# 9. Music Assistant restarts mid-play
-# =============================================================================
-
-
 class TestMARestart:
     async def test_quick_restart_shows_stopped_and_play_works_after_reconnect(self, rig, caplog):
         await rig.play_album(0)
@@ -1047,11 +984,6 @@ class TestMARestart:
         assert_no_backend_errors(caplog)
 
 
-# =============================================================================
-# 10. The Music Assistant token expires or is revoked
-# =============================================================================
-
-
 class TestTokenRevoked:
     async def test_revoked_token_stops_reconnecting_and_the_app_shows_stopped(self, rig):
         await rig.play_album(0)
@@ -1068,11 +1000,6 @@ class TestTokenRevoked:
         await rig.idle(0.5)  # 25 reconnect delays
         assert len(rig.server.created_clients) - before == 1  # one attempt, then it gave up
         assert rig.conn.status.state == ConnectionState.AUTH_FAILED
-
-
-# =============================================================================
-# 11. The add-on restarts mid-play
-# =============================================================================
 
 
 class TestAddonRestart:
@@ -1145,11 +1072,6 @@ class TestAddonRestart:
             await second.close()
 
 
-# =============================================================================
-# 12. Switching to another Qobuz Connect device and back
-# =============================================================================
-
-
 class TestSwitchQobuzDevice:
     async def test_switching_away_stops_ma_once_and_switching_back_plays(self, rig):
         await rig.play_album(0)
@@ -1178,11 +1100,6 @@ class TestSwitchQobuzDevice:
             ),
             "playing here again",
         )
-
-
-# =============================================================================
-# 13. Music Assistant unreachable when the add-on starts
-# =============================================================================
 
 
 class TestMAUnreachableAtBoot:

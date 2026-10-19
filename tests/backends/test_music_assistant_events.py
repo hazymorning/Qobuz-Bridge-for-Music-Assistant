@@ -38,9 +38,6 @@ async def other_client_clears_the_queue(r: Rig) -> None:
     await r.settle()
 
 
-# --------------------------------------------------------------------------- track end
-
-
 class TestTrackEnd:
     async def test_gapless_transition_reports_next_track_started(self, rig: Rig) -> None:
         await rig.play_for("101", 195)
@@ -154,9 +151,6 @@ class TestTrackEnd:
         await rig.play_for("101", 205)  # 5 s past MA's duration is within the margin
         await rig.poll()
         assert rig.cb.endings() == NOTHING_FIRED
-
-
-# --------------------------------------------------------------------- MA UI actions
 
 
 class TestMAUserActions:
@@ -280,9 +274,6 @@ class TestMAUserActions:
         assert rig.cb.endings() == NOTHING_FIRED
 
 
-# --------------------------------------------------------------------------- takeover
-
-
 class TestTakeover:
     async def test_external_content_releases_the_session_and_stops_writing(self, rig: Rig) -> None:
         await rig.play_for("101", 30)
@@ -391,9 +382,6 @@ class TestTakeover:
         assert rig.cb.endings() == NOTHING_FIRED
 
 
-# ------------------------------------------------------------------- connection loss
-
-
 class TestConnectionLoss:
     async def test_disconnect_while_playing_interrupts_after_the_grace(
         self,
@@ -476,9 +464,6 @@ class TestConnectionLoss:
         assert rig.cb.endings() == {**NOTHING_FIRED, "interrupted": 1}
 
 
-# --------------------------------------------------------------------------- detached
-
-
 class TestDetached:
     async def test_no_callbacks_for_old_items_after_our_stop(self, rig: Rig) -> None:
         await rig.play_for("101", 30)
@@ -514,9 +499,6 @@ class TestDetached:
 
         assert rig.cb.endings() == {**NOTHING_FIRED, "interrupted": 1}
         assert rig.calls("player_queues/play_index") == []
-
-
-# ---------------------------------------------------------------------- add-on restart
 
 
 class TestAddonRestart:

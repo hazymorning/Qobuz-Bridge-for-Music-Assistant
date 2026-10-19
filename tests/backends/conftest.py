@@ -139,8 +139,6 @@ class Rig:
         for conn in self.connections:
             await conn.stop()
 
-    # --- waiting -------------------------------------------------------------------------
-
     async def settle(self) -> None:
         await self.server.settle()
 
@@ -165,8 +163,6 @@ class Rig:
         """MA becomes unreachable and the connection notices."""
         self.server.set_reachable(False, drop=True)
         await self.wait(lambda: not self.conn.is_connected, what="connection lost")
-
-    # --- driving the backend like the Player does ---------------------------------------
 
     async def play(
         self, track_id: str, start_ms: int = 0, backend: Optional[MusicAssistantBackend] = None
@@ -200,8 +196,6 @@ class Rig:
         state = await b.get_state()
         await b.get_position()
         return state
-
-    # --- reading MA -----------------------------------------------------------------------
 
     def queue(self) -> Any:
         return self.server.queue(QID)

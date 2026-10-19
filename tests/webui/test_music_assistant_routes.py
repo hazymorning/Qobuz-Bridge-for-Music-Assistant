@@ -177,11 +177,6 @@ def levels(checks: list[dict[str, str]]) -> list[tuple[str, str]]:
     return [(c["id"], c["level"]) for c in checks]
 
 
-# =============================================================================
-# Static files
-# =============================================================================
-
-
 async def test_index_loads_the_panel_assets_with_the_cache_buster(fresh):
     body = await (await fresh.client.get("/")).text()
     assert 'src="static/panel.js?v=9.9.9"' in body
@@ -202,11 +197,6 @@ def test_panel_js_only_uses_relative_api_urls():
     assert urls and all(url.startswith("api/") for url in urls), urls
     # An absolute path would escape the Home Assistant ingress prefix
     assert not re.search(r"""["'`]/api/""", js)
-
-
-# =============================================================================
-# GET /api/music-assistant/status
-# =============================================================================
 
 
 class TestStatusRoute:
@@ -233,11 +223,6 @@ class TestStatusRoute:
         configured.auth_state["name"] = ""
         qobuz = (await configured.status())["qobuz"]
         assert qobuz == {"logged_in": True, "account": "user@example.com"}
-
-
-# =============================================================================
-# build_checks()
-# =============================================================================
 
 
 def panel_status(
@@ -361,11 +346,6 @@ class TestBuildChecks:
         assert "2.10.7" in checks_by_id(checks)["music_assistant"]["detail"]
 
 
-# =============================================================================
-# POST /api/music-assistant/connect, POST /api/music-assistant/disconnect
-# =============================================================================
-
-
 class TestConnectRoute:
     async def test_login_connects_and_returns_the_status_without_secrets(self, fresh):
         before = await fresh.status()
@@ -401,11 +381,6 @@ class TestConnectRoute:
         assert configured.saved().token == ""
 
 
-# =============================================================================
-# PUT /api/music-assistant/players
-# =============================================================================
-
-
 class TestPlayersRoute:
     async def test_update_is_applied_saved_and_returned(self, configured):
         resp = await configured.client.put(
@@ -430,10 +405,6 @@ class TestPlayersRoute:
         saved = configured.saved()
         assert saved.expose_all is True and saved.selected_player_ids == ["grp"]
 
-
-# =============================================================================
-# Request validation
-# =============================================================================
 
 WRITES = [("post", "/api/music-assistant/connect"), ("put", "/api/music-assistant/players")]
 
