@@ -7,12 +7,18 @@ queue (queue id == player id) and MA streams it, so MA's UI shows the track,
 artwork, queue and progress. The streaming URL the player resolves is not used;
 that lookup still serves as the region-availability check.
 
-Ownership model (mirrors the DLNA backend): the MA queue items this backend
-created are "ours". MA moving onto our armed next item is a gapless transition;
-MA stopping, finishing or pausing our item is reported to the player; anything
-else showing up on the queue means someone took the player over in MA, and the
-backend hands it back without sending MA another command (no fight-back) until
-the Qobuz app selects the device again.
+Ownership model (mirrors the DLNA backend):
+
+- The MA queue items this backend created are "ours" (remembered across add-on
+  restarts in the data directory).
+- While *attached* (the Qobuz app is playing through us), MA moving onto our
+  armed next item is a gapless transition, MA finishing our track is a track
+  end, and MA stopping it is an interruption (the app shows stopped). After a
+  stop, an interruption or a restart the backend is detached: it follows MA
+  silently and never makes the player advance.
+- Anything else showing up on the queue while attached means someone took the
+  player over in MA: the backend hands it back without another MA command
+  (no fight-back) until the Qobuz app selects the device again.
 
 MA pushes state over the websocket, so get_state()/get_position() read the
 client's cache and never call MA.
@@ -21,10 +27,10 @@ client's cache and never call MA.
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Awaitable, Callable, Optional
 
-from music_assistant_models.enums import EventType, PlayerType, QueueOption, RepeatMode
+from music_assistant_models.enums import EventType, QueueOption, RepeatMode
 from music_assistant_models.enums import PlaybackState as MAPlaybackState
 from music_assistant_models.errors import (
     InvalidDataError,
@@ -35,29 +41,45 @@ from music_assistant_models.errors import (
     UnplayableMediaError,
 )
 
-from qobuz_proxy.backends.base import AudioBackend, ExternalPlaybackAware
+from qobuz_proxy.backends.base import AudioBackend, ExternalPlaybackAware, TrackUnavailableError
 from qobuz_proxy.backends.types import BackendInfo, BackendTrackMetadata, PlaybackState
 
 from .connection import MAConnectionState, MAConnectionStatus, MANotConnectedError
+from .settings import SessionStore
 
 logger = logging.getLogger(__name__)
 
 # Ignore MA's transitional states this long after we started or moved a track.
 START_GRACE_SECONDS = 4.0
-# A stop with more than this left is someone stopping it, not the track ending.
-EARLY_STOP_MARGIN_MS = 15_000
+# MA "idle" must last this long before it counts (streams restart briefly on seek).
+IDLE_SETTLE_SECONDS = 3.0
+# An MA stop/next/seek marks the queue busy; an idle this soon after one is not a track end.
+PLAY_ACTION_WINDOW_SECONDS = 3.0
+# A stop with more than this left is not the track ending by itself.
+END_MARGIN_MS = 10_000
+# MA still reports "playing" this long past the track's end: it lost track of the speaker.
+STALL_MARGIN_MS = 10_000
 # Tell the app the track stopped if MA stays unreachable this long while playing.
 DISCONNECT_GRACE_SECONDS = 20.0
-# The player seeks right after play(); skip it when MA already starts there.
-SEEK_TOLERANCE_MS = 2_500
+# Seeks this close to where MA already is are skipped (MA restarts the stream to seek).
+SEEK_TOLERANCE_MS = 1_500
+# Right after taking over what MA plays, a seek back by up to this much is a stale position.
+ADOPT_STALE_SEEK_MS = 300_000
 # Don't adopt MA's current track right after we stopped it ourselves.
 ADOPT_BLOCK_AFTER_STOP_SECONDS = 5.0
-# Coalesce device-side volume changes before reporting them to the app.
-VOLUME_DEBOUNCE_SECONDS = 0.3
-# Wait before retrying to queue a next track after a transient MA error.
+# Wait this long after a track starts before queuing the next one in MA.
+NEXT_ARM_DELAY_SECONDS = 1.5
+# Wait before retrying to queue a next track after an MA error.
 NEXT_RETRY_COOLDOWN_SECONDS = 5.0
+# Keep the queued next track this long for play() after stop(next_track_id=...).
+JUMP_WAIT_SECONDS = 3.0
+# Coalesce device-side volume changes; ignore MA's echoes this long after we set one.
+VOLUME_DEBOUNCE_SECONDS = 0.3
+VOLUME_SETTLE_SECONDS = 1.5
 # Starting at or below this position is a normal start, not a positioned one.
 POSITIONED_START_MIN_MS = 2_000
+# MA can take a while to resolve, buffer and start a track on a speaker or group.
+PLAY_TIMEOUT_SECONDS = 30.0
 
 _UNPLAYABLE_ERRORS = (MediaNotFoundError, UnplayableMediaError, InvalidProviderURI)
 
@@ -88,6 +110,7 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         name: Optional[str] = None,
         *,
         uri_template: str = "qobuz://track/{track_id}",
+        session_store: Optional[SessionStore] = None,
     ) -> None:
         super().__init__(name=name or player_id)
         self._conn = connection
@@ -95,6 +118,7 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         self._uri_template = uri_template
         # Provider domain that marks a queue item as a Qobuz track ("qobuz")
         self._domain = uri_template.split("://", 1)[0]
+        self._sessions = session_store if session_store is not None else SessionStore.default()
 
         self._current: Optional[_OwnItem] = None
         self._current_meta: Optional[BackendTrackMetadata] = None
@@ -102,33 +126,43 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         self._own_item_ids: set[str] = set()
         self._stale_item_ids: set[str] = set()
 
-        self._external = False
-        self._starting = False
-        self._stopping = False
+        self._attached = False  # the Qobuz app is playing through us right now
+        self._external = False  # someone else took the player over in MA
+        self._busy = 0  # our own multi-step MA writes in flight
         self._arming = False
         self._play_started_at = 0.0
+        self._last_play_action_at = 0.0
         self._last_stop_at: Optional[float] = None
         self._ma_state: Optional[MAPlaybackState] = None
         self._paused_hold = False
-        self._ended_fired = False
-        self._stale_handling = False
+        self._end_reported = False
         self._position_ms = 0
         self._furthest_position_ms = 0
-        self._skip_seek_target: Optional[int] = None
+        self._last_seek_target: Optional[int] = None
+        self._last_seek_at = 0.0
+        self._adopt_seek_until = 0.0
+        self._adopt_position_ms = 0
         self._session_prepared = False
 
         self._failed_next: set[tuple[str, int]] = set()
         self._next_retry_after = 0.0
+        self._foreign_next_logged = False
         self._gapless_supported = True
 
         self._pending_volume: Optional[int] = None
         self._volume_lock = asyncio.Lock()
-        self._volume_timer: Optional[asyncio.TimerHandle] = None
+        self._volume_settle_until = 0.0
         self._last_ma_volume: Optional[int] = None
 
+        self._idle_timer: Optional[asyncio.TimerHandle] = None
+        self._reevaluate_timer: Optional[asyncio.TimerHandle] = None
         self._disconnect_timer: Optional[asyncio.TimerHandle] = None
+        self._volume_timer: Optional[asyncio.TimerHandle] = None
+        self._jump_timer: Optional[asyncio.TimerHandle] = None
         self._on_external_playback_cb: Optional[Callable[[], Awaitable[None]]] = None
-        self._tasks: set[asyncio.Task[Any]] = set()
+        self._takeover_task: Optional["asyncio.Future[Any]"] = None
+        self._stale_task: Optional["asyncio.Future[Any]"] = None
+        self._tasks: set["asyncio.Future[Any]"] = set()
         self._unsubscribers: list[Callable[[], None]] = []
 
     # =========================================================================
@@ -159,6 +193,7 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         """
         if self._is_connected:
             return True
+        self._restore_session()
         self._unsubscribers = [
             self._conn.add_event_listener(self._player_id, self._on_ma_event),
             self._conn.add_state_listener(self._on_connection_state),
@@ -180,11 +215,14 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
             except Exception:
                 pass
         self._unsubscribers = []
-        for timer in (self._disconnect_timer, self._volume_timer):
-            if timer is not None:
-                timer.cancel()
-        self._disconnect_timer = None
-        self._volume_timer = None
+        for attr in (
+            "_idle_timer",
+            "_reevaluate_timer",
+            "_disconnect_timer",
+            "_volume_timer",
+            "_jump_timer",
+        ):
+            self._cancel_timer(attr)
         for task in list(self._tasks):
             task.cancel()
 
@@ -210,18 +248,23 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
                 "Another source is playing on this player in Music Assistant; "
                 "select it again in the Qobuz app"
             )
-        self._starting = True
+        self._cancel_timer("_jump_timer")
+        self._cancel_timer("_idle_timer")
+        adopted = False
+        self._busy += 1
         try:
             item = await self._adopt(metadata)
+            adopted = item is not None
             if item is None:
                 item = await self._jump_to_armed(metadata, start_ms)
             if item is None:
                 item = await self._start_track(metadata, start_ms)
             self._set_current(item, metadata)
-            if start_ms >= POSITIONED_START_MIN_MS:
-                self._position_ms = start_ms
-                self._furthest_position_ms = start_ms
-                self._skip_seek_target = start_ms
+            if adopted:
+                self._position_ms = self._furthest_position_ms = self._adopt_position_ms
+            elif start_ms >= POSITIONED_START_MIN_MS:
+                self._position_ms = self._furthest_position_ms = start_ms
+            self._attached = True
             self._notify_state_change(PlaybackState.PLAYING)
         except MANotConnectedError:
             raise
@@ -234,7 +277,9 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
                 metadata.title,
                 e,
             )
-            raise RuntimeError(f"Music Assistant could not play track {metadata.track_id}") from e
+            raise TrackUnavailableError(
+                f"Music Assistant could not play track {metadata.track_id}"
+            ) from e
         except PlayerUnavailableError as e:
             logger.error(
                 "[%s] Music Assistant reports this player as unavailable: %s", self.name, e
@@ -243,9 +288,13 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         except MusicAssistantError as e:
             raise RuntimeError(f"Music Assistant refused to play: {e}") from e
         finally:
-            self._starting = False
-            # Let the player record the new state before we look at MA's events.
-            asyncio.get_running_loop().call_soon(self._evaluate)
+            self._busy -= 1
+        # The player records PLAYING and the start position once we return; look at
+        # MA's state (and report MA's real position after an adoption) after that.
+        loop = asyncio.get_running_loop()
+        if adopted:
+            loop.call_soon(self._notify_position_update, self._position_ms)
+        loop.call_soon(self._evaluate)
 
     async def _adopt(self, metadata: BackendTrackMetadata) -> Optional[_OwnItem]:
         """Take over MA's current item if it already plays this track.
@@ -253,8 +302,6 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         After an add-on restart (or a re-selection) the Qobuz app asks for the
         track MA is still playing; restarting it would be audible.
         """
-        if self._current is not None:
-            return None
         if (
             self._last_stop_at is not None
             and time.monotonic() - self._last_stop_at < ADOPT_BLOCK_AFTER_STOP_SECONDS
@@ -265,24 +312,25 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
             return None
         if queue.state not in (MAPlaybackState.PLAYING, MAPlaybackState.PAUSED):
             return None
-        if self._item_track_id(queue.current_item) != metadata.track_id:
+        cur = queue.current_item
+        if not self._item_has_track(cur, metadata.track_id):
             return None
-        item = self._own_item(queue.current_item, metadata)
+        if self._current is not None and cur.queue_item_id != self._current.item_id:
+            return None
         logger.info(
-            "[%s] Music Assistant is already playing track %s; taking it over without restarting",
+            "[%s] Music Assistant is already playing track %s; continuing it without restarting",
             self.name,
             metadata.track_id,
         )
         if queue.state == MAPlaybackState.PAUSED:
+            qid = self._player_id
             await self._conn.call(
-                f"player_queues/play queue={self._player_id} (resume adopted track)",
-                lambda c: c.player_queues.play(self._player_id),
+                f"player_queues/play queue={qid} (resume the track MA has)",
+                lambda c: c.player_queues.play(qid),
             )
-        position = int(queue.corrected_elapsed_time * 1000)
-        self._skip_seek_target = position
-        self._position_ms = position
-        self._furthest_position_ms = position
-        return item
+        self._adopt_position_ms = int(queue.corrected_elapsed_time * 1000)
+        self._adopt_seek_until = time.monotonic() + START_GRACE_SECONDS
+        return self._own_item(cur, metadata)
 
     async def _jump_to_armed(
         self, metadata: BackendTrackMetadata, start_ms: int
@@ -291,13 +339,13 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         armed = self._armed
         if armed is None or armed.track_id != metadata.track_id:
             return None
+        qid = self._player_id
         seek_s = start_ms // 1000 if start_ms >= POSITIONED_START_MIN_MS else 0
         try:
             await self._conn.call(
-                f"player_queues/play_index queue={self._player_id} item={armed.item_id}",
-                lambda c: c.player_queues.play_index(
-                    self._player_id, armed.item_id, seek_position=seek_s
-                ),
+                f"player_queues/play_index queue={qid} item={armed.item_id}",
+                lambda c: c.player_queues.play_index(qid, armed.item_id, seek_position=seek_s),
+                timeout=PLAY_TIMEOUT_SECONDS,
             )
         except InvalidDataError:
             # The queued item is gone (queue edited in MA); start the track afresh
@@ -308,24 +356,28 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
 
     async def _start_track(self, metadata: BackendTrackMetadata, start_ms: int) -> _OwnItem:
         """Replace the MA queue with this track, optionally starting mid-track."""
-        await self._prepare_session()
         uri = self._uri(metadata.track_id)
         qid = self._player_id
-        self._armed = None
+        if self._armed is not None:
+            self._stale_item_ids.add(self._armed.item_id)
+            self._armed = None
+        found: Optional[Any] = None
         if start_ms < POSITIONED_START_MIN_MS:
             await self._conn.call(
                 f"player_queues/play_media queue={qid} media={uri} option=replace",
                 lambda c: c.player_queues.play_media(qid, media=uri, option=QueueOption.REPLACE),
+                timeout=PLAY_TIMEOUT_SECONDS,
             )
             queue = self._conn.get_queue(qid)
             current = queue.current_item if queue is not None else None
             if (
                 current is not None
                 and current.queue_item_id not in self._own_item_ids
-                and self._item_track_id(current) == metadata.track_id
+                and self._item_has_track(current, metadata.track_id)
             ):
-                return self._own_item(current, metadata)
-            found = await self._find_new_item(metadata.track_id, offset=0)
+                found = current
+            else:
+                found = await self._find_new_item(metadata.track_id, offset=0)
         else:
             # One stream start at the right spot instead of play-then-seek
             await self._conn.call(
@@ -334,6 +386,7 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
             await self._conn.call(
                 f"player_queues/play_media queue={qid} media={uri} option=add",
                 lambda c: c.player_queues.play_media(qid, media=uri, option=QueueOption.ADD),
+                timeout=PLAY_TIMEOUT_SECONDS,
             )
             found = await self._find_new_item(metadata.track_id, offset=0)
             if found is not None:
@@ -342,21 +395,24 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
                 await self._conn.call(
                     f"player_queues/play_index queue={qid} item={item_id} seek={seek_s}s",
                     lambda c: c.player_queues.play_index(qid, item_id, seek_position=seek_s),
+                    timeout=PLAY_TIMEOUT_SECONDS,
                 )
         if found is None:
             raise MediaNotFoundError(
                 f"Music Assistant did not queue Qobuz track {metadata.track_id}"
             )
+        # After the queue was replaced: a dynamic queue refuses repeat changes before
+        await self._prepare_session()
         return self._own_item(found, metadata)
 
     async def _prepare_session(self) -> None:
         """Turn off MA queue settings that would fight the Qobuz queue (once per selection)."""
         if self._session_prepared:
             return
-        self._session_prepared = True
         queue = self._conn.get_queue(self._player_id)
         if queue is None:
             return
+        self._session_prepared = True
         qid = self._player_id
         if getattr(queue, "repeat_mode", RepeatMode.OFF) not in (RepeatMode.OFF, None):
             try:
@@ -369,42 +425,46 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
                     "what plays next",
                     self.name,
                 )
-            except MusicAssistantError as e:
+            except (MANotConnectedError, MusicAssistantError) as e:
                 logger.info("[%s] Could not turn off repeat in Music Assistant: %s", self.name, e)
         autoplay = getattr(queue, "autoplay_enabled", None)
         if autoplay is None:
             autoplay = getattr(queue, "dont_stop_the_music_enabled", False)
-        if autoplay:
+        if not autoplay:
+            return
+        try:
+            await self._conn.call(
+                f"player_queues/autoplay queue={qid} autoplay_enabled=false",
+                lambda c: c.send_command(
+                    "player_queues/autoplay", queue_id=qid, autoplay_enabled=False
+                ),
+            )
+        except MusicAssistantError:
             try:
                 await self._conn.call(
-                    f"player_queues/autoplay queue={qid} autoplay_enabled=false",
-                    lambda c: c.send_command(
-                        "player_queues/autoplay", queue_id=qid, autoplay_enabled=False
-                    ),
+                    f"player_queues/dont_stop_the_music queue={qid} enabled=false",
+                    lambda c: c.player_queues.dont_stop_the_music(qid, False),
                 )
-            except MusicAssistantError:
-                try:
-                    await self._conn.call(
-                        f"player_queues/dont_stop_the_music queue={qid} enabled=false",
-                        lambda c: c.player_queues.dont_stop_the_music(qid, False),
-                    )
-                except MusicAssistantError as e:
-                    logger.info("[%s] Could not turn off autoplay: %s", self.name, e)
-                    return
-            logger.info(
-                "[%s] Turned off autoplay in Music Assistant so the album ends when the Qobuz "
-                "queue ends",
-                self.name,
-            )
+            except (MANotConnectedError, MusicAssistantError) as e:
+                logger.info("[%s] Could not turn off autoplay: %s", self.name, e)
+                return
+        except MANotConnectedError:
+            return
+        logger.info(
+            "[%s] Turned off autoplay in Music Assistant so the album ends when the Qobuz "
+            "queue ends",
+            self.name,
+        )
 
     async def pause(self) -> None:
         logger.info("[%s] Qobuz: pause", self.name)
         if not self._conn.is_connected:
             raise MANotConnectedError("Music Assistant is not connected")
+        self._cancel_timer("_idle_timer")
         if self._ma_plays_ours():
+            qid = self._player_id
             await self._conn.call(
-                f"player_queues/pause queue={self._player_id}",
-                lambda c: c.player_queues.pause(self._player_id),
+                f"player_queues/pause queue={qid}", lambda c: c.player_queues.pause(qid)
             )
         self._paused_hold = True
         self._notify_state_change(PlaybackState.PAUSED)
@@ -414,7 +474,8 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         if not self._conn.is_connected or self._external or self._current is None:
             return False
         current = self._current
-        queue = self._conn.get_queue(self._player_id)
+        qid = self._player_id
+        queue = self._conn.get_queue(qid)
         if (
             queue is not None
             and queue.active
@@ -422,23 +483,21 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
             and queue.current_item.queue_item_id == current.item_id
         ):
             if queue.state == MAPlaybackState.PLAYING:
-                self._paused_hold = False
-                self._notify_state_change(PlaybackState.PLAYING)
+                self._resumed()
                 return True
             if queue.state == MAPlaybackState.PAUSED or (
                 queue.state == MAPlaybackState.IDLE and not queue.ended
             ):
+                self._busy += 1
                 try:
                     await self._conn.call(
-                        f"player_queues/play queue={self._player_id}",
-                        lambda c: c.player_queues.play(self._player_id),
+                        f"player_queues/play queue={qid}", lambda c: c.player_queues.play(qid)
                     )
                 except (MANotConnectedError, MusicAssistantError):
                     return False
-                self._paused_hold = False
-                self._ma_state = MAPlaybackState.PLAYING
-                self._play_started_at = time.monotonic()
-                self._notify_state_change(PlaybackState.PLAYING)
+                finally:
+                    self._busy -= 1
+                self._resumed()
                 return True
         if queue is not None and self._foreign_content_playing(queue):
             self._takeover("Music Assistant is playing something else")
@@ -447,7 +506,7 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         if self._current_meta is None:
             return False
         meta = BackendTrackMetadata(
-            **{**self._current_meta.__dict__, "start_position_ms": self._position_ms}
+            **{**asdict(self._current_meta), "start_position_ms": self._position_ms}
         )
         self._current = None
         try:
@@ -457,46 +516,87 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
             return False
         return True
 
+    def _resumed(self) -> None:
+        self._paused_hold = False
+        self._attached = True
+        self._ma_state = MAPlaybackState.PLAYING
+        self._play_started_at = time.monotonic()
+        self._notify_state_change(PlaybackState.PLAYING)
+        asyncio.get_running_loop().call_soon(self._evaluate)
+
     async def stop(self, *, next_track_id: Optional[str] = None) -> None:
+        self._cancel_timer("_idle_timer")
         armed = self._armed
+        self._attached = False
+        self._paused_hold = False
         if next_track_id is not None and armed is not None and armed.track_id == next_track_id:
-            # play() jumps straight to the item MA already has queued
+            # play() is about to jump straight to the item MA already has queued.
+            # If it doesn't come (load superseded, skip while paused), stop then.
             logger.info("[%s] Qobuz: stop (switching to the queued next track)", self.name)
-            self._paused_hold = False
+            self._cancel_timer("_jump_timer")
+            self._jump_timer = asyncio.get_running_loop().call_later(
+                JUMP_WAIT_SECONDS, self._on_jump_timeout
+            )
             self._notify_state_change(PlaybackState.STOPPED)
             return
         logger.info("[%s] Qobuz: stop", self.name)
-        if self._ma_plays_ours():
-            self._stopping = True
-            try:
-                await self._conn.call(
-                    f"player_queues/stop queue={self._player_id}",
-                    lambda c: c.player_queues.stop(self._player_id),
-                )
-                self._last_stop_at = time.monotonic()
-                self._ma_state = MAPlaybackState.IDLE
-            except (MANotConnectedError, MusicAssistantError) as e:
-                logger.warning("[%s] Music Assistant did not stop: %s", self.name, e)
-            finally:
-                self._stopping = False
+        self._cancel_timer("_jump_timer")
+        await self._stop_ma()
         if armed is not None:
             self._stale_item_ids.add(armed.item_id)
         self._armed = None
-        self._paused_hold = False
         self._notify_state_change(PlaybackState.STOPPED)
+
+    async def _stop_ma(self) -> None:
+        """Stop MA, but only while it still plays our track."""
+        if not self._ma_plays_ours():
+            return
+        qid = self._player_id
+        self._busy += 1
+        try:
+            await self._conn.call(
+                f"player_queues/stop queue={qid}", lambda c: c.player_queues.stop(qid)
+            )
+            self._last_stop_at = time.monotonic()
+            self._ma_state = MAPlaybackState.IDLE
+        except (MANotConnectedError, MusicAssistantError) as e:
+            logger.warning("[%s] Music Assistant did not stop: %s", self.name, e)
+        finally:
+            self._busy -= 1
+
+    def _on_jump_timeout(self) -> None:
+        self._jump_timer = None
+        if self._attached:
+            return
+        armed = self._armed
+        if armed is not None:
+            self._stale_item_ids.add(armed.item_id)
+            self._armed = None
+        logger.info("[%s] The queued next track was not played; stopping", self.name)
+        self._spawn(self._stop_ma())
 
     # =========================================================================
     # Position control
     # =========================================================================
 
     async def seek(self, position_ms: int) -> None:
-        target = self._skip_seek_target
-        self._skip_seek_target = None
-        if (
-            target is not None
-            and abs(position_ms - target) <= SEEK_TOLERANCE_MS
-            and time.monotonic() - self._play_started_at < START_GRACE_SECONDS
+        now = time.monotonic()
+        live = self._live_position_ms()
+        if now < self._adopt_seek_until and live - ADOPT_STALE_SEEK_MS <= position_ms <= (
+            live + SEEK_TOLERANCE_MS
         ):
+            logger.info(
+                "[%s] Qobuz: seek to %s skipped: Music Assistant kept playing at %s",
+                self.name,
+                _format_ms(position_ms),
+                _format_ms(live),
+            )
+            return
+        if (
+            self._last_seek_target is not None
+            and now - self._last_seek_at < 3.0
+            and abs(position_ms - self._last_seek_target) <= SEEK_TOLERANCE_MS
+        ) or (self._our_queue() is not None and abs(position_ms - live) <= SEEK_TOLERANCE_MS):
             logger.debug("[%s] Already at %s; skipping seek", self.name, _format_ms(position_ms))
             return
         logger.info("[%s] Qobuz: seek to %s", self.name, _format_ms(position_ms))
@@ -504,26 +604,36 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
             raise MANotConnectedError("Music Assistant is not connected")
         if not self._ma_plays_ours():
             raise RuntimeError("Cannot seek: Music Assistant is not playing this Qobuz track")
+        qid = self._player_id
         seconds = int(round(position_ms / 1000))
-        await self._conn.call(
-            f"player_queues/seek queue={self._player_id} position={seconds}s",
-            lambda c: c.player_queues.seek(self._player_id, seconds),
-        )
+        self._cancel_timer("_idle_timer")
+        self._busy += 1
+        try:
+            await self._conn.call(
+                f"player_queues/seek queue={qid} position={seconds}s",
+                lambda c: c.player_queues.seek(qid, seconds),
+                timeout=PLAY_TIMEOUT_SECONDS,
+            )
+        finally:
+            self._busy -= 1
         # MA restarts the stream to seek; don't read that as a stop
         self._play_started_at = time.monotonic()
+        self._last_seek_target = position_ms
+        self._last_seek_at = time.monotonic()
         self._position_ms = position_ms
         self._furthest_position_ms = position_ms
 
     async def get_position(self) -> int:
         queue = self._our_queue()
-        if queue is not None and self._current is not None:
-            position = int(queue.corrected_elapsed_time * 1000)
-            if self._current.duration_ms > 0:
-                position = min(position, self._current.duration_ms)
-            self._position_ms = max(0, position)
-            if queue.state == MAPlaybackState.PLAYING:
-                self._furthest_position_ms = max(self._furthest_position_ms, self._position_ms)
+        if queue is not None:
+            self._update_position(queue)
         return self._position_ms
+
+    def _live_position_ms(self) -> int:
+        queue = self._our_queue()
+        if queue is None:
+            return self._position_ms
+        return int(queue.corrected_elapsed_time * 1000)
 
     # =========================================================================
     # Volume
@@ -536,6 +646,7 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
             return
         self._volume = level
         self._pending_volume = level
+        self._volume_settle_until = time.monotonic() + VOLUME_SETTLE_SECONDS
         async with self._volume_lock:
             # A newer value queued behind us wins; only send the latest one.
             if self._pending_volume != level:
@@ -550,19 +661,18 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
                 return
             logger.info("[%s] Qobuz: volume %s%%", self.name, level)
             self._last_ma_volume = level
-            player = self._conn.get_player(self._player_id)
-            if player is not None and player.type == PlayerType.GROUP:
-                await self._conn.call(
-                    f"players/cmd/group_volume player={self._player_id} level={level}",
-                    lambda c: c.players.group_volume(self._player_id, level),
-                )
-            else:
-                await self._conn.call(
-                    f"players/cmd/volume_set player={self._player_id} level={level}",
-                    lambda c: c.players.volume_set(self._player_id, level),
-                )
+            pid = self._player_id
+            # group_volume sets a group (or a speaker leading one) as a whole and
+            # falls back to a plain volume set for a single speaker.
+            await self._conn.call(
+                f"players/cmd/group_volume player={pid} level={level}",
+                lambda c: c.players.group_volume(pid, level),
+            )
+            self._volume_settle_until = time.monotonic() + VOLUME_SETTLE_SECONDS
 
     async def get_volume(self) -> int:
+        if time.monotonic() < self._volume_settle_until:
+            return self._volume  # MA has not caught up with our last change yet
         player = self._conn.get_player(self._player_id)
         level = self._read_volume(player) if player is not None else None
         if level is not None:
@@ -570,9 +680,11 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         return self._volume
 
     def _read_volume(self, player: Any) -> Optional[int]:
-        if player.type == PlayerType.GROUP:
-            value = getattr(player, "group_volume", None)
-        else:
+        grouped = bool(getattr(player, "group_members", None)) or (
+            getattr(getattr(player, "type", None), "value", "") == "group"
+        )
+        value = getattr(player, "group_volume", None) if grouped else None
+        if not isinstance(value, (int, float)):
             value = getattr(player, "volume_level", None)
         return int(value) if isinstance(value, (int, float)) else None
 
@@ -581,20 +693,26 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
     # =========================================================================
 
     async def get_state(self) -> PlaybackState:
-        if self._starting:
-            return PlaybackState.PLAYING
-        if self._current is None:
+        # The player polls this every 0.5 s while playing or paused, which also
+        # catches decisions a quiet MA (no further events) would leave pending.
+        self._evaluate()
+        if self._busy:
+            return PlaybackState.PLAYING if self._state == PlaybackState.STOPPED else self._state
+        if self._current is None or not self._attached:
             return PlaybackState.STOPPED
         if not self._conn.is_connected:
             return self._state  # frozen until MA is back
         queue = self._our_queue()
         if queue is None:
-            return PlaybackState.STOPPED
+            return self._state
         if queue.state == MAPlaybackState.PLAYING:
             return PlaybackState.PLAYING
-        if queue.state == MAPlaybackState.PAUSED:
+        if queue.state == MAPlaybackState.PAUSED or self._paused_hold:
             return PlaybackState.PAUSED
-        return PlaybackState.PAUSED if self._paused_hold else PlaybackState.STOPPED
+        # Idle but not decided yet (settling, or a speaker still starting)
+        if self._idle_timer is not None or self._in_grace():
+            return PlaybackState.PLAYING
+        return PlaybackState.STOPPED
 
     # =========================================================================
     # Gapless
@@ -608,37 +726,80 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         armed = self._armed
         if (
             armed is not None
-            and (armed.track_id, armed.qobuz_queue_item_id) == key
+            and armed.track_id == metadata.track_id
             and armed.item_id not in self._stale_item_ids
         ):
+            armed.qobuz_queue_item_id = queue_item_id
             return True
-        if key in self._failed_next or time.monotonic() < self._next_retry_after:
+        now = time.monotonic()
+        if key in self._failed_next or now < self._next_retry_after:
             return False
-        if self._arming or not self._conn.is_connected or not self._ma_plays_ours():
+        if self._arming or self._busy or not self._attached or not self._ma_plays_ours():
             return False
-        logger.info("[%s] Qobuz: queue next track %s '%s'", self.name, *key[:1], metadata.title)
         qid = self._player_id
+        queue = self._conn.get_queue(qid)
+        if queue is None or queue.state != MAPlaybackState.PLAYING:
+            return False  # MA only hands the next track to a playing speaker
+        extra = getattr(queue, "extra_attributes", None) or {}
+        if extra.get("play_action_in_progress") or now - self._play_started_at < (
+            NEXT_ARM_DELAY_SECONDS
+        ):
+            return False
+        current_index = queue.current_index or 0
         uri = self._uri(metadata.track_id)
         self._arming = True
         try:
+            after = await self._conn.call(
+                f"player_queues/items queue={qid} offset={current_index + 1}",
+                lambda c: c.player_queues.get_queue_items(qid, limit=10, offset=current_index + 1),
+            )
+            first = after[0] if after else None
+            if (
+                first is not None
+                and self._item_has_track(first, metadata.track_id)
+                and (
+                    first.queue_item_id in self._own_item_ids
+                    or queue.index_in_buffer == current_index + 1
+                )
+            ):
+                # MA already has this track next (e.g. queued before an add-on restart)
+                item = self._own_item(first, metadata)
+                item.qobuz_queue_item_id = queue_item_id
+                self._armed = item
+                self._save_session()
+                return True
+            foreign = [i for i in after if i.queue_item_id not in self._own_item_ids]
+            if foreign:
+                if not self._foreign_next_logged:
+                    self._foreign_next_logged = True
+                    logger.info(
+                        "[%s] Music Assistant has other tracks queued after this one; leaving "
+                        "them alone (Music Assistant takes over when this track ends)",
+                        self.name,
+                    )
+                self._next_retry_after = now + 30.0
+                return False
+            logger.info(
+                "[%s] Qobuz: queue next track %s '%s'", self.name, metadata.track_id, metadata.title
+            )
             if armed is not None:
                 # REPLACE_NEXT drops it unless the speaker already buffered it
                 self._stale_item_ids.add(armed.item_id)
                 self._armed = None
-            queue = self._conn.get_queue(qid)
-            offset = (queue.current_index or 0) if queue is not None else 0
             await self._conn.call(
                 f"player_queues/play_media queue={qid} media={uri} option=replace_next",
                 lambda c: c.player_queues.play_media(
                     qid, media=uri, option=QueueOption.REPLACE_NEXT
                 ),
+                timeout=PLAY_TIMEOUT_SECONDS,
             )
-            found = await self._find_new_item(metadata.track_id, offset=offset)
+            found = await self._find_new_item(metadata.track_id, offset=current_index)
             if found is None:
                 raise MediaNotFoundError(f"Music Assistant did not queue track {metadata.track_id}")
             item = self._own_item(found, metadata)
             item.qobuz_queue_item_id = queue_item_id
             self._armed = item
+            self._save_session()
             logger.info(
                 "[%s] Queued next track %s in Music Assistant (gapless)",
                 self.name,
@@ -648,8 +809,8 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         except _UNPLAYABLE_ERRORS as e:
             self._failed_next.add(key)
             logger.warning(
-                "[%s] Music Assistant cannot queue track %s: %s (it will be skipped or played "
-                "without gapless)",
+                "[%s] Music Assistant cannot queue track %s: %s (it will be handled when the "
+                "current track ends)",
                 self.name,
                 metadata.track_id,
                 e,
@@ -671,20 +832,26 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         self._armed = None
         # If MA reaches it anyway (already buffered), we step past it
         self._stale_item_ids.add(armed.item_id)
+        self._save_session()
         if not self._conn.is_connected or self._external:
             return
+        qid = self._player_id
         logger.info(
             "[%s] Qobuz: next track changed; removing %s from MA", self.name, armed.track_id
         )
+        self._busy += 1
         try:
             await self._conn.call(
-                f"player_queues/delete_item queue={self._player_id} item={armed.item_id}",
-                lambda c: c.player_queues.delete_item(self._player_id, armed.item_id),
+                f"player_queues/delete_item queue={qid} item={armed.item_id}",
+                lambda c: c.player_queues.delete_item(qid, armed.item_id),
             )
             if not await self._item_in_queue(armed.item_id):
                 self._stale_item_ids.discard(armed.item_id)
         except (MANotConnectedError, MusicAssistantError) as e:
             logger.debug("[%s] Could not remove the queued next track: %s", self.name, e)
+        finally:
+            self._busy -= 1
+            asyncio.get_running_loop().call_soon(self._evaluate)
 
     # =========================================================================
     # External playback (another source took over)
@@ -696,6 +863,7 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
     def prepare_for_selection(self) -> None:
         """A new selection in the Qobuz app may take the player back."""
         self._session_prepared = False
+        self._foreign_next_logged = False
         if self._external:
             self._external = False
             self._current = None
@@ -704,6 +872,13 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
 
     async def check_external_playback(self) -> bool:
         self._evaluate()
+        task = self._takeover_task
+        if task is not None and not task.done():
+            # Release the old session before a new selection builds on it
+            try:
+                await task
+            except Exception:
+                pass
         return self._external
 
     async def can_apply_remote_state(self) -> bool:
@@ -730,55 +905,59 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
 
     def _on_ma_event(self, event: Any) -> None:
         try:
-            if event.event == EventType.PLAYER_UPDATED:
+            kind = event.event
+            if kind == EventType.PLAYER_UPDATED:
                 self._check_device_volume()
-            elif event.event == EventType.QUEUE_TIME_UPDATED:
+            elif kind == EventType.QUEUE_TIME_UPDATED:
                 self._check_position_jump()
-            if event.event in (
-                EventType.QUEUE_UPDATED,
-                EventType.QUEUE_ADDED,
-                EventType.PLAYER_UPDATED,
-                EventType.QUEUE_TIME_UPDATED,
-            ):
-                self._evaluate()
+            elif kind == EventType.PLAYER_REMOVED:
+                self._start_disconnect_timer()
+            elif kind in (EventType.PLAYER_ADDED, EventType.QUEUE_ADDED):
+                if self._conn.get_queue(self._player_id) is not None:
+                    self._cancel_timer("_disconnect_timer")
+            self._evaluate()
         except Exception as e:
             logger.error("[%s] Error handling a Music Assistant event: %s", self.name, e)
 
     def _on_connection_state(self, status: MAConnectionStatus) -> None:
         try:
             if status.state == MAConnectionState.CONNECTED:
-                if self._disconnect_timer is not None:
-                    self._disconnect_timer.cancel()
-                    self._disconnect_timer = None
                 player = self._conn.get_player(self._player_id)
                 if player is not None:
                     self._last_ma_volume = self._read_volume(player)
-                # Resync: MA may have stopped (restart) or moved on while we were away
+                # MA may not have re-registered the player yet after a restart
+                if self._conn.get_queue(self._player_id) is not None:
+                    self._cancel_timer("_disconnect_timer")
                 self._evaluate()
-            elif (
-                self._current is not None
-                and self._state == PlaybackState.PLAYING
-                and self._disconnect_timer is None
-            ):
-                loop = asyncio.get_running_loop()
-                self._disconnect_timer = loop.call_later(
-                    DISCONNECT_GRACE_SECONDS, self._on_disconnect_grace_expired
-                )
+            else:
+                self._start_disconnect_timer()
         except Exception as e:
             logger.error("[%s] Error handling the Music Assistant connection: %s", self.name, e)
 
+    def _start_disconnect_timer(self) -> None:
+        if (
+            self._current is None
+            or not self._attached
+            or self._state != PlaybackState.PLAYING
+            or self._disconnect_timer is not None
+        ):
+            return
+        loop = asyncio.get_running_loop()
+        self._disconnect_timer = loop.call_later(
+            DISCONNECT_GRACE_SECONDS, self._on_disconnect_grace_expired
+        )
+
     def _on_disconnect_grace_expired(self) -> None:
         self._disconnect_timer = None
-        if self._conn.is_connected or self._current is None or self._external:
+        if not self._attached or self._current is None or self._external:
             return
-        if self._state != PlaybackState.PLAYING:
+        if self._conn.is_connected and self._conn.get_queue(self._player_id) is not None:
+            self._evaluate()
             return
         logger.warning(
             "[%s] Lost Music Assistant; showing the track as stopped in the Qobuz app", self.name
         )
-        self._ma_state = MAPlaybackState.IDLE
-        self._notify_state_change(PlaybackState.STOPPED)
-        self._notify_playback_interrupted(self._position_ms)
+        self._report_interrupted()
 
     def _check_device_volume(self) -> None:
         player = self._conn.get_player(self._player_id)
@@ -788,11 +967,10 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         if level is None or level == self._last_ma_volume:
             return
         self._last_ma_volume = level
-        if level == self._volume:
+        if time.monotonic() < self._volume_settle_until or abs(level - self._volume) <= 1:
             return  # our own change echoed back
         self._volume = level
-        if self._volume_timer is not None:
-            self._volume_timer.cancel()
+        self._cancel_timer("_volume_timer")
         loop = asyncio.get_running_loop()
         self._volume_timer = loop.call_later(VOLUME_DEBOUNCE_SECONDS, self._report_device_volume)
 
@@ -805,20 +983,22 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
 
     def _check_position_jump(self) -> None:
         queue = self._our_queue()
-        if queue is None or self._starting:
+        if queue is None or self._busy:
             return
         position = int(queue.corrected_elapsed_time * 1000)
         if abs(position - self._position_ms) > 2000:
-            logger.info("[%s] MA: seek to %s in Music Assistant", self.name, _format_ms(position))
             self._position_ms = position
             self._furthest_position_ms = position
-            self._notify_position_update(position)
+            if self._attached:
+                logger.info(
+                    "[%s] MA: seek to %s in Music Assistant", self.name, _format_ms(position)
+                )
+                self._notify_position_update(position)
 
     def _evaluate(self) -> None:
         """Map MA's queue state onto the player callbacks (sync; never awaits)."""
         if (
-            self._starting
-            or self._stopping
+            self._busy
             or self._current is None
             or self._external
             or not self._is_connected
@@ -830,44 +1010,17 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
             return
         extra = getattr(queue, "extra_attributes", None) or {}
         if extra.get("play_action_in_progress"):
-            return  # MA is switching tracks; wait for the settled state
-        current = self._current
+            # MA is switching tracks or handling a stop/next/seek: wait for the
+            # settled state, and remember it so a following idle isn't a track end.
+            self._last_play_action_at = time.monotonic()
+            self._schedule_reevaluate(1.0)
+            return
         cur_item = queue.current_item
         cur_id = cur_item.queue_item_id if cur_item is not None else None
         in_grace = self._in_grace()
 
-        if cur_id == current.item_id:
-            if not queue.active:
-                if not in_grace:
-                    self._takeover("the player switched to another source in Music Assistant")
-                return
-            self._update_position(queue)
-            state = queue.state
-            if state == MAPlaybackState.PAUSED:
-                if not self._paused_hold:
-                    logger.info("[%s] MA: paused in Music Assistant", self.name)
-                self._paused_hold = True
-            elif state == MAPlaybackState.PLAYING:
-                if self._paused_hold and self._ma_state != MAPlaybackState.PLAYING:
-                    logger.info("[%s] MA: playing again in Music Assistant", self.name)
-                self._paused_hold = False
-            if (
-                self._ma_state == MAPlaybackState.PLAYING
-                and state == MAPlaybackState.IDLE
-                and not in_grace
-                and not self._paused_hold
-            ):
-                if queue.ended or self._near_end():
-                    self._fire_track_ended()
-                else:
-                    logger.info(
-                        "[%s] MA: stopped in Music Assistant at %s",
-                        self.name,
-                        _format_ms(self._furthest_position_ms),
-                    )
-                    self._notify_state_change(PlaybackState.STOPPED)
-                    self._notify_playback_interrupted(self._furthest_position_ms)
-            self._ma_state = state
+        if cur_id == self._current.item_id:
+            self._evaluate_current(queue, in_grace)
             return
 
         armed = self._armed
@@ -876,52 +1029,144 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
             return
 
         if cur_id is not None and cur_id in self._stale_item_ids:
-            self._handle_stale_arrival()
+            if self._attached:
+                self._handle_stale_arrival(cur_id)
             return
 
         if in_grace or self._arming:
+            self._schedule_reevaluate(self._grace_left() + 0.2)
             return
-        if self._state not in (PlaybackState.PLAYING, PlaybackState.PAUSED):
-            # Nothing of ours is live; just forget it, nothing to hand back
-            if cur_id is not None or queue.state != MAPlaybackState.IDLE:
-                logger.info("[%s] MA: Music Assistant moved on to something else", self.name)
-                self._current = None
-                self._current_meta = None
-                self._armed = None
+
+        if not self._attached:
+            # Nothing of ours is live in the Qobuz app: just follow MA
+            if cur_id is None or cur_id not in self._own_item_ids or not queue.active:
+                logger.debug("[%s] MA moved on to something else", self.name)
+                self._forget_current()
             return
+
         if cur_id is None:
-            if queue.state == MAPlaybackState.IDLE:
-                # Queue cleared in MA while we were playing: treat as a stop
-                logger.info("[%s] MA: queue cleared in Music Assistant", self.name)
-                self._ma_state = MAPlaybackState.IDLE
-                self._notify_state_change(PlaybackState.STOPPED)
-                self._notify_playback_interrupted(self._furthest_position_ms)
+            logger.info("[%s] MA: queue cleared in Music Assistant", self.name)
+            self._report_interrupted()
+            return
+        if cur_id in self._own_item_ids and queue.active:
+            # One of our earlier tracks, e.g. "previous" pressed in Music Assistant
+            logger.info(
+                "[%s] MA: went back to an earlier track in Music Assistant; "
+                "showing stopped in the Qobuz app",
+                self.name,
+            )
+            self._report_interrupted()
             return
         name = getattr(cur_item, "name", "") or "another item"
         self._takeover(f"Music Assistant is now playing something else ({name})")
 
+    def _evaluate_current(self, queue: Any, in_grace: bool) -> None:
+        """MA's current item is our current track."""
+        if not queue.active:
+            if in_grace:
+                self._schedule_reevaluate(self._grace_left() + 0.2)
+            elif self._attached:
+                self._takeover("the player switched to another source in Music Assistant")
+            else:
+                self._forget_current()
+            return
+        self._update_position(queue)
+        state = queue.state
+        if not self._attached:
+            self._ma_state = state
+            return
+        if state == MAPlaybackState.PAUSED:
+            if not self._paused_hold:
+                logger.info("[%s] MA: paused in Music Assistant", self.name)
+            self._paused_hold = True
+            self._cancel_timer("_idle_timer")
+        elif state == MAPlaybackState.PLAYING:
+            if self._paused_hold:
+                logger.info("[%s] MA: playing again in Music Assistant", self.name)
+            self._paused_hold = False
+            self._cancel_timer("_idle_timer")
+            self._check_stall(queue)
+        elif state == MAPlaybackState.IDLE:
+            if in_grace:
+                # A speaker that is still starting (or restarting the stream)
+                self._schedule_reevaluate(self._grace_left() + 0.2)
+                return
+            if (
+                not self._paused_hold
+                and self._ma_state == MAPlaybackState.PLAYING
+                and self._idle_timer is None
+            ):
+                self._idle_timer = asyncio.get_running_loop().call_later(
+                    IDLE_SETTLE_SECONDS, self._on_idle_settled
+                )
+                return  # keep _ma_state PLAYING until the idle is confirmed
+        self._ma_state = state
+
+    def _on_idle_settled(self) -> None:
+        """MA stayed idle on our track: it ended, or someone stopped it."""
+        self._idle_timer = None
+        if self._busy or self._external or not self._attached or self._paused_hold:
+            return
+        queue = self._our_queue()
+        if queue is None:
+            self._evaluate()
+            return
+        if queue.state != MAPlaybackState.IDLE:
+            return
+        recent_action = time.monotonic() - self._last_play_action_at < (
+            PLAY_ACTION_WINDOW_SECONDS + IDLE_SETTLE_SECONDS
+        )
+        if (queue.ended or self._near_end()) and not recent_action:
+            self._report_ended()
+        else:
+            logger.info(
+                "[%s] MA: stopped in Music Assistant at %s",
+                self.name,
+                _format_ms(self._furthest_position_ms),
+            )
+            self._report_interrupted()
+
+    def _check_stall(self, queue: Any) -> None:
+        """MA says playing far past the end: it lost track of the speaker."""
+        duration = self._current.duration_ms if self._current is not None else 0
+        if duration <= 0 or self._in_grace():
+            return
+        if int(queue.corrected_elapsed_time * 1000) > duration + STALL_MARGIN_MS:
+            logger.warning(
+                "[%s] Music Assistant stopped reporting progress for this track (another app may "
+                "be playing on the speaker); showing stopped in the Qobuz app",
+                self.name,
+            )
+            self._report_interrupted()
+
     def _promote_armed(self, armed: _OwnItem, queue: Any) -> None:
         """MA moved onto the next track we queued (gapless, or "next" in MA)."""
-        logger.info("[%s] MA: moved on to the next Qobuz track %s", self.name, armed.track_id)
         self._current = armed
         self._armed = None
         self._position_ms = 0
         self._furthest_position_ms = 0
-        self._ended_fired = False
+        self._end_reported = False
         self._paused_hold = queue.state == MAPlaybackState.PAUSED
         self._play_started_at = time.monotonic()
-        self._ma_state = queue.state
+        self._ma_state = MAPlaybackState.PLAYING
+        self._cancel_timer("_idle_timer")
+        self._save_session()
+        if not self._attached:
+            return
+        logger.info("[%s] MA: moved on to the next Qobuz track %s", self.name, armed.track_id)
         self._notify_next_track_started()
         self._notify_position_update(0)
 
-    def _handle_stale_arrival(self) -> None:
+    def _handle_stale_arrival(self, item_id: str) -> None:
         """MA reached a next track the Qobuz app no longer wants (it was already buffered)."""
-        if self._stale_handling:
+        if self._stale_task is not None and not self._stale_task.done():
             return
-        self._stale_handling = True
+        self._stale_item_ids.discard(item_id)
         armed = self._armed
+        qid = self._player_id
 
         async def step_past() -> None:
+            self._busy += 1
             try:
                 if armed is not None:
                     logger.info(
@@ -930,42 +1175,54 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
                         armed.track_id,
                     )
                     await self._conn.call(
-                        f"player_queues/play_index queue={self._player_id} item={armed.item_id}",
-                        lambda c: c.player_queues.play_index(self._player_id, armed.item_id),
+                        f"player_queues/play_index queue={qid} item={armed.item_id}",
+                        lambda c: c.player_queues.play_index(qid, armed.item_id),
+                        timeout=PLAY_TIMEOUT_SECONDS,
                     )
                 else:
                     logger.info("[%s] MA reached an outdated next track; stopping it", self.name)
-                    self._stopping = True
-                    try:
-                        await self._conn.call(
-                            f"player_queues/stop queue={self._player_id}",
-                            lambda c: c.player_queues.stop(self._player_id),
-                        )
-                    finally:
-                        self._stopping = False
-                    self._fire_track_ended()
+                    await self._conn.call(
+                        f"player_queues/stop queue={qid}", lambda c: c.player_queues.stop(qid)
+                    )
+                    self._report_ended()
             except (MANotConnectedError, MusicAssistantError) as e:
                 logger.warning("[%s] Could not step past the outdated track: %s", self.name, e)
             finally:
-                self._stale_handling = False
+                self._busy -= 1
+                asyncio.get_running_loop().call_soon(self._evaluate)
 
-        self._spawn(step_past())
+        self._stale_task = self._spawn(step_past())
 
-    def _fire_track_ended(self) -> None:
-        if self._ended_fired:
+    def _report_ended(self) -> None:
+        if self._end_reported:
             return
-        self._ended_fired = True
-        logger.info("[%s] MA: track finished", self.name)
+        self._end_reported = True
+        self._attached = False
         self._ma_state = MAPlaybackState.IDLE
+        self._cancel_timer("_idle_timer")
+        logger.info("[%s] MA: track finished", self.name)
         self._notify_state_change(PlaybackState.STOPPED)
         self._notify_track_ended()
+
+    def _report_interrupted(self) -> None:
+        if self._end_reported:
+            return
+        self._end_reported = True
+        self._attached = False
+        self._ma_state = MAPlaybackState.IDLE
+        self._cancel_timer("_idle_timer")
+        self._notify_state_change(PlaybackState.STOPPED)
+        self._notify_playback_interrupted(self._furthest_position_ms)
 
     def _takeover(self, reason: str) -> None:
         """Someone else uses the player now: hand it back, never fight."""
         if self._external:
             return
         self._external = True
+        self._attached = False
         self._armed = None
+        self._cancel_timer("_idle_timer")
+        self._cancel_timer("_jump_timer")
         logger.warning(
             "[%s] %s — handing the player back to Music Assistant and leaving the Qobuz "
             "session (no fight-back)",
@@ -974,7 +1231,7 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         )
         self._notify_state_change(PlaybackState.STOPPED)
         if self._on_external_playback_cb is not None:
-            self._spawn(self._on_external_playback_cb())
+            self._takeover_task = self._spawn(self._on_external_playback_cb())
 
     # =========================================================================
     # Helpers
@@ -983,18 +1240,23 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
     def _uri(self, track_id: str) -> str:
         return self._uri_template.format(track_id=track_id)
 
-    def _item_track_id(self, item: Any) -> Optional[str]:
-        """The Qobuz track id behind an MA queue item (library items included)."""
+    def _item_has_track(self, item: Any, track_id: str) -> bool:
+        """Whether an MA queue item is this Qobuz track (library items included)."""
         media = getattr(item, "media_item", None)
         if media is None:
-            return None
+            return False
         provider = str(getattr(media, "provider", ""))
-        if provider == self._domain or provider.startswith(f"{self._domain}--"):
-            return str(media.item_id)
+        if (provider == self._domain or provider.startswith(f"{self._domain}--")) and str(
+            getattr(media, "item_id", "")
+        ) == track_id:
+            return True
         for mapping in getattr(media, "provider_mappings", None) or []:
-            if getattr(mapping, "provider_domain", "") == self._domain:
-                return str(mapping.item_id)
-        return None
+            if (
+                getattr(mapping, "provider_domain", "") == self._domain
+                and str(getattr(mapping, "item_id", "")) == track_id
+            ):
+                return True
+        return False
 
     def _own_item(self, queue_item: Any, metadata: BackendTrackMetadata) -> _OwnItem:
         duration_s = getattr(queue_item, "duration", None)
@@ -1014,11 +1276,19 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         self._current_meta = metadata
         self._position_ms = 0
         self._furthest_position_ms = 0
-        self._ended_fired = False
+        self._end_reported = False
         self._paused_hold = False
         self._external = False
         self._play_started_at = time.monotonic()
         self._ma_state = MAPlaybackState.PLAYING
+        self._save_session()
+
+    def _forget_current(self) -> None:
+        self._current = None
+        self._current_meta = None
+        self._armed = None
+        self._attached = False
+        self._save_session()
 
     async def _find_new_item(self, track_id: str, offset: int) -> Optional[Any]:
         """Find the queue item MA just created for ``track_id`` (play_media returns nothing)."""
@@ -1030,16 +1300,17 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         for item in items:
             if item.queue_item_id in self._own_item_ids:
                 continue
-            if self._item_track_id(item) == track_id:
+            if self._item_has_track(item, track_id):
                 return item
         return None
 
     async def _item_in_queue(self, item_id: str) -> bool:
-        queue = self._conn.get_queue(self._player_id)
+        qid = self._player_id
+        queue = self._conn.get_queue(qid)
         offset = (queue.current_index or 0) if queue is not None else 0
         items = await self._conn.call(
-            f"player_queues/items queue={self._player_id} offset={offset}",
-            lambda c: c.player_queues.get_queue_items(self._player_id, limit=20, offset=offset),
+            f"player_queues/items queue={qid} offset={offset}",
+            lambda c: c.player_queues.get_queue_items(qid, limit=20, offset=offset),
         )
         return any(item.queue_item_id == item_id for item in items)
 
@@ -1055,7 +1326,12 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         return queue
 
     def _ma_plays_ours(self) -> bool:
-        """Whether MA is playing or paused on our current (or armed) item."""
+        """Whether MA is playing or paused on our current (or armed) item.
+
+        MA describes the speaker from its own queue, so another app playing on
+        the speaker directly (e.g. a WiiM's built-in Qobuz Connect) is not
+        visible here; the stall check catches it later.
+        """
         if self._current is None or not self._conn.is_connected:
             return False
         queue = self._conn.get_queue(self._player_id)
@@ -1066,15 +1342,7 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
             ours.add(self._armed.item_id)
         if queue.current_item.queue_item_id not in ours:
             return False
-        if queue.state not in (MAPlaybackState.PLAYING, MAPlaybackState.PAUSED):
-            return False
-        player = self._conn.get_player(self._player_id)
-        media = getattr(player, "current_media", None) if player is not None else None
-        media_item_id = getattr(media, "queue_item_id", None) if media is not None else None
-        if media_item_id and media_item_id not in self._own_item_ids:
-            # The speaker plays something MA did not queue for us (e.g. its own Qobuz Connect)
-            return False
-        return True
+        return queue.state in (MAPlaybackState.PLAYING, MAPlaybackState.PAUSED)
 
     def _foreign_content_playing(self, queue: Any) -> bool:
         if not queue.active:
@@ -1090,20 +1358,78 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         position = int(queue.corrected_elapsed_time * 1000)
         if self._current is not None and self._current.duration_ms > 0:
             position = min(position, self._current.duration_ms)
-        self._position_ms = max(0, position)
+        position = max(0, position)
+        if position < self._position_ms - 2000:
+            self._furthest_position_ms = position  # moved back (seek or restart)
+        self._position_ms = position
         if queue.state == MAPlaybackState.PLAYING:
-            self._furthest_position_ms = max(self._furthest_position_ms, self._position_ms)
+            self._furthest_position_ms = max(self._furthest_position_ms, position)
 
     def _near_end(self) -> bool:
         duration = self._current.duration_ms if self._current is not None else 0
         if duration <= 0 or self._furthest_position_ms <= 0:
             return True  # unknown: treat as an end so the queue never stalls
-        return duration - self._furthest_position_ms <= EARLY_STOP_MARGIN_MS
+        return duration - self._furthest_position_ms <= END_MARGIN_MS
 
     def _in_grace(self) -> bool:
-        return time.monotonic() - self._play_started_at < START_GRACE_SECONDS
+        return self._grace_left() > 0
 
-    def _spawn(self, coro: Awaitable[Any]) -> None:
+    def _grace_left(self) -> float:
+        return START_GRACE_SECONDS - (time.monotonic() - self._play_started_at)
+
+    def _schedule_reevaluate(self, delay: float) -> None:
+        if self._reevaluate_timer is not None:
+            return
+        loop = asyncio.get_running_loop()
+
+        def run() -> None:
+            self._reevaluate_timer = None
+            self._evaluate()
+
+        self._reevaluate_timer = loop.call_later(max(0.05, delay), run)
+
+    def _cancel_timer(self, attr: str) -> None:
+        timer = getattr(self, attr)
+        if timer is not None:
+            timer.cancel()
+            setattr(self, attr, None)
+
+    def _spawn(self, coro: Awaitable[Any]) -> "asyncio.Future[Any]":
         task = asyncio.ensure_future(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+        return task
+
+    # Sessions survive an add-on restart, so MA's current item is still known as ours.
+
+    def _save_session(self) -> None:
+        if self._current is None:
+            self._sessions.put(self._player_id, None)
+            return
+        session: dict[str, Any] = {"current": asdict(self._current)}
+        if self._armed is not None:
+            session["armed"] = asdict(self._armed)
+        self._sessions.put(self._player_id, session)
+
+    def _restore_session(self) -> None:
+        session = self._sessions.get(self._player_id)
+        if not session:
+            return
+        try:
+            self._current = _OwnItem(**session["current"])
+            if session.get("armed"):
+                self._armed = _OwnItem(**session["armed"])
+        except (KeyError, TypeError) as e:
+            logger.debug("[%s] Ignoring a saved session: %s", self.name, e)
+            self._current = self._armed = None
+            return
+        self._own_item_ids.add(self._current.item_id)
+        if self._armed is not None:
+            self._own_item_ids.add(self._armed.item_id)
+        # Detached until the Qobuz app plays again: we only follow MA meanwhile.
+        self._attached = False
+        logger.info(
+            "[%s] Remembered the last Qobuz track %s from before the restart",
+            self.name,
+            self._current.track_id,
+        )

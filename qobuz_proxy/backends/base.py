@@ -17,6 +17,15 @@ from .types import (
 
 logger = logging.getLogger(__name__)
 
+
+class TrackUnavailableError(RuntimeError):
+    """The backend cannot play this track (raised from play()).
+
+    The player then skips it like a track Qobuz itself reports as unavailable.
+    Any other exception from play() stays a plain playback error.
+    """
+
+
 # Event callback types
 StateChangeCallback = Callable[[PlaybackState], None]
 PositionUpdateCallback = Callable[[int], None]  # position_ms

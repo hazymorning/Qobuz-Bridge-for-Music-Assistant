@@ -435,7 +435,7 @@ class Speaker:
 
     def _on_device_volume_change(self, level: int) -> None:
         """Report a volume change made on the device (e.g. in Music Assistant) to the app."""
-        if not self._player:
+        if not self._player or not (self._ws_manager and self._ws_manager.is_renderer_active):
             return
         logger.info(f"[{self.name}] Volume changed on the device: {level}%")
         task = asyncio.create_task(self._player.broadcast_current_volume())
@@ -591,7 +591,9 @@ class Speaker:
         if self._metadata_service:
             self._metadata_service.set_max_quality(new_quality)
 
-        if self._player:
+        # Music Assistant streams with its own quality setting; reloading would
+        # only restart the track audibly.
+        if self._player and self._config.backend_type != "music_assistant":
             await self._player.reload_current_track()
 
     def _handle_protocol_error(self, msg_type: int, msg: object) -> None:

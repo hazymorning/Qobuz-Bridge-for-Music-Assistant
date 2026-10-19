@@ -144,3 +144,60 @@ class MASettingsStore:
             except OSError:
                 pass
             raise
+
+
+SESSIONS_FILENAME = "music_assistant_sessions.json"
+
+
+class SessionStore:
+    """Which MA queue items each backend created, kept across add-on restarts.
+
+    After a restart Music Assistant is usually still playing; knowing its
+    current item is ours lets the backend take it over instead of treating it
+    as someone else's music. Holds only MA item ids and Qobuz track ids.
+    ``path=None`` keeps everything in memory (tests).
+    """
+
+    _shared: dict[Path, "SessionStore"] = {}
+
+    def __init__(self, path: Optional[Path] = None) -> None:
+        self.path = path
+        self._data: dict[str, dict[str, Any]] = {}
+        if path is not None and path.exists():
+            try:
+                with open(path, encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    self._data = {str(k): v for k, v in loaded.items() if isinstance(v, dict)}
+            except (OSError, ValueError) as e:
+                logger.warning(f"Could not read {path} ({e}); starting without saved sessions")
+
+    @classmethod
+    def default(cls) -> "SessionStore":
+        """The store in the data directory, shared by all backends of this process."""
+        path = default_data_dir() / SESSIONS_FILENAME
+        if path not in cls._shared:
+            cls._shared[path] = cls(path)
+        return cls._shared[path]
+
+    def get(self, player_id: str) -> Optional[dict[str, Any]]:
+        return self._data.get(player_id)
+
+    def put(self, player_id: str, session: Optional[dict[str, Any]]) -> None:
+        if session is None:
+            if self._data.pop(player_id, None) is None:
+                return
+        elif self._data.get(player_id) == session:
+            return
+        else:
+            self._data[player_id] = session
+        if self.path is None:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".ma-sessions-", suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(self._data, f)
+            os.replace(tmp, self.path)
+        except OSError as e:
+            logger.debug(f"Could not save Music Assistant sessions: {e}")

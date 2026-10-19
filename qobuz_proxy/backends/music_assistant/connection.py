@@ -146,6 +146,7 @@ class MusicAssistantConnection:
         )
         self._event_listeners: dict[Optional[str], list[EventListener]] = {}
         self._state_listeners: list[Callable[[MAConnectionStatus], None]] = []
+        self._timeouts = 0  # consecutive command timeouts
 
     # ------------------------------------------------------------------
     # Properties
@@ -277,11 +278,17 @@ class MusicAssistantConnection:
     # Commands
     # ------------------------------------------------------------------
 
-    async def call(self, description: str, fn: Callable[[Any], Awaitable[T]]) -> T:
+    async def call(
+        self,
+        description: str,
+        fn: Callable[[Any], Awaitable[T]],
+        timeout: float = 10.0,
+    ) -> T:
         """Run one MA command, logged, with connection errors mapped.
 
         Raises:
-            MANotConnectedError: MA is not connected or the socket dropped mid-call.
+            MANotConnectedError: MA is not connected, did not answer within
+                ``timeout``, or the socket dropped mid-call.
             MusicAssistantError: MA answered with an error (logged, re-raised).
         """
         client = self.client
@@ -290,11 +297,22 @@ class MusicAssistantConnection:
             raise MANotConnectedError("Music Assistant is not connected")
         logger.info(f"MA → {description}")
         try:
-            return await fn(client)
+            result = await asyncio.wait_for(fn(client), timeout)
+        except asyncio.TimeoutError:
+            self._timeouts += 1
+            logger.warning(f"MA ✗ {description}: no answer from Music Assistant in {timeout:.0f}s")
+            stuck = self._client
+            if self._timeouts >= 2 and stuck is not None and stuck is client:
+                # Probably a dead socket the heartbeat has not noticed yet
+                logger.warning("Music Assistant stopped answering; reconnecting")
+                asyncio.ensure_future(stuck.disconnect())
+            raise MANotConnectedError("Music Assistant did not answer in time") from None
         except asyncio.CancelledError:
-            # The client cancels pending commands when its socket closes; only
-            # turn that into an error if the connection really went away.
-            if client is not self._client or not self.is_connected:
+            # The client cancels pending commands when its socket closes. That is
+            # a lost connection unless our own task is the one being cancelled.
+            task = asyncio.current_task()
+            cancelling = getattr(task, "cancelling", None)
+            if task is not None and cancelling is not None and cancelling() == 0:
                 logger.warning(f"MA ✗ {description}: connection to Music Assistant lost")
                 raise MANotConnectedError("Lost the connection to Music Assistant") from None
             raise
@@ -302,8 +320,11 @@ class MusicAssistantConnection:
             logger.warning(f"MA ✗ {description}: connection to Music Assistant lost ({e})")
             raise MANotConnectedError("Lost the connection to Music Assistant") from e
         except MusicAssistantError as e:
+            self._timeouts = 0
             logger.warning(f"MA ✗ {description}: {type(e).__name__}: {e}")
             raise
+        self._timeouts = 0
+        return result
 
     # ------------------------------------------------------------------
     # Internals
@@ -442,6 +463,7 @@ class MusicAssistantConnection:
                 return True
 
             self._client = client
+            self._timeouts = 0
             server_info = getattr(client, "server_info", None)
             version = str(getattr(server_info, "server_version", "") or "")
             qobuz = self._qobuz_provider_available(client)

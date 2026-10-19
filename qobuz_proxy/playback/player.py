@@ -15,6 +15,7 @@ from qobuz_proxy.backends import (
     PlaybackState,
     BufferStatus,
 )
+from qobuz_proxy.backends.base import TrackUnavailableError
 from .queue import QobuzQueue, QueueTrack, RepeatMode
 from .metadata import MetadataService
 
@@ -779,6 +780,15 @@ class QobuzPlayer:
         if success and position_ms > 0:
             await self.backend.seek(position_ms)
 
+        # The backend could not play it (TrackUnavailableError): skip it like an
+        # unavailable track instead of stopping the album.
+        failed = self._current_track
+        if not success and failed is not None and failed.streaming_url is None:
+            if self._request_next_track:
+                await self._begin_skip_wait_locked()
+            else:
+                await self._skip_past_unplayable_locked()
+
         return success
 
     async def reload_current_track(self) -> bool:
@@ -1301,7 +1311,12 @@ class QobuzPlayer:
             return True
 
         except Exception as e:
-            logger.error(f"Failed to start playback: {e}", exc_info=True)
+            if isinstance(e, TrackUnavailableError):
+                # Forget the URL so the unplayable-track skip handles it
+                logger.warning(f"Backend cannot play track {track.track_id}: {e}")
+                track.streaming_url = None
+            else:
+                logger.error(f"Failed to start playback: {e}", exc_info=True)
             self._state = PlaybackState.ERROR
             await self._send_state_update()
             return False

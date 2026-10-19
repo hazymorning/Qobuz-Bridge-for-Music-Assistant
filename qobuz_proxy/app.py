@@ -474,7 +474,7 @@ class QobuzProxy:
         self._config.speakers.append(sc)
         self._save_config()
 
-        speaker = Speaker(config=sc, api_client=self._api_client, app_id=self._app_id)
+        speaker = self._new_speaker(sc)
         started = await speaker.start()
         if started:
             self._speakers.append(speaker)
@@ -538,6 +538,7 @@ class QobuzProxy:
             proxy_port=old_config.proxy_port,
             audio_device=body.get("audio_device", old_config.audio_device),
             audio_buffer_size=int(body.get("buffer_size", old_config.audio_buffer_size)),
+            ma_player_id=old_config.ma_player_id,
         )
 
         # Persist first: the edit is saved even if the restart below fails
@@ -551,7 +552,7 @@ class QobuzProxy:
             await self._speakers[speaker_idx].stop()
 
         assert self._api_client is not None
-        new_speaker = Speaker(config=new_config, api_client=self._api_client, app_id=self._app_id)
+        new_speaker = self._new_speaker(new_config)
         started = await new_speaker.start()
         if speaker_idx is not None:
             self._speakers[speaker_idx] = new_speaker
@@ -624,6 +625,18 @@ class QobuzProxy:
             else:
                 result.append(_configured_speaker_status(sc, "disconnected"))
         return result
+
+    def _new_speaker(self, sc: SpeakerConfig) -> Speaker:
+        """Build a Speaker; music_assistant speakers get the shared MA connection."""
+        assert self._api_client is not None
+        return Speaker(
+            config=sc,
+            api_client=self._api_client,
+            app_id=self._app_id,
+            ma_connection=(
+                self._ma_manager.connection if sc.backend_type == "music_assistant" else None
+            ),
+        )
 
     def _make_ma_speaker(self, sc: SpeakerConfig, connection: Any) -> Speaker:
         """Build the Speaker for one Music Assistant player."""
@@ -702,14 +715,7 @@ class QobuzProxy:
         running_ids = {slugify_name(s.name) for s in self._speakers}
         configs = [sc for sc in self._config.speakers if slugify_name(sc.name) not in running_ids]
 
-        speakers = [
-            Speaker(
-                config=sc,
-                api_client=self._api_client,
-                app_id=self._app_id,
-            )
-            for sc in configs
-        ]
+        speakers = [self._new_speaker(sc) for sc in configs]
 
         tasks = [asyncio.ensure_future(s.start()) for s in speakers]
         try:
@@ -781,7 +787,7 @@ class QobuzProxy:
                 if self._api_client is None:
                     return  # Logged out — speakers restart on the next login
 
-                speaker = Speaker(config=config, api_client=self._api_client, app_id=self._app_id)
+                speaker = self._new_speaker(config)
                 try:
                     started = await speaker.start()
                 except asyncio.CancelledError:

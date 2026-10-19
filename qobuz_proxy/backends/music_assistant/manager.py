@@ -334,12 +334,13 @@ class MusicAssistantManager:
             for pid in list(self._speakers):
                 running = self._speaker_configs.get(pid)
                 wanted = desired.get(pid)
-                if (
-                    wanted is None
-                    or running is None
-                    or ((wanted.name, wanted.http_port) != (running.name, running.http_port))
-                ):
-                    await self._stop_speaker(pid)
+                if wanted is not None and running is not None:
+                    if (wanted.name, wanted.http_port) == (running.name, running.http_port):
+                        continue
+                    if self._speaker_busy(pid):
+                        # A rename restarts the device; wait until it is idle
+                        continue
+                await self._stop_speaker(pid)
             for pid in list(self._retry_tasks):
                 if pid not in desired:
                     self._retry_tasks.pop(pid).cancel()
@@ -516,6 +517,15 @@ class MusicAssistantManager:
         finally:
             if self._retry_tasks.get(pid) is asyncio.current_task():
                 self._retry_tasks.pop(pid, None)
+
+    def _speaker_busy(self, pid: str) -> bool:
+        speaker = self._speakers.get(pid)
+        if speaker is None:
+            return False
+        try:
+            return speaker.get_status().get("status") in ("playing", "paused")
+        except Exception:
+            return False
 
     async def _stop_speaker(self, pid: str) -> None:
         speaker = self._speakers.pop(pid, None)
