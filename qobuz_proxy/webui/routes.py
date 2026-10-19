@@ -9,6 +9,7 @@ from typing import Any
 from aiohttp import web
 
 from qobuz_proxy.auth.oauth import build_oauth_url, exchange_code, extract_code
+from qobuz_proxy.webui.ma_routes import register_ma_routes
 from qobuz_proxy.webui.speaker_routes import register_speaker_routes
 
 logger = logging.getLogger(__name__)
@@ -132,4 +133,5 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/auth/callback", _handle_auth_callback)
     app.router.add_post("/api/auth/logout", _handle_logout)
     register_speaker_routes(app)
+    register_ma_routes(app)
     app.router.add_static("/static", _STATIC_DIR)

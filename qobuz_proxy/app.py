@@ -34,6 +34,8 @@ from qobuz_proxy.config import (
     parse_device_type,
     slugify_name,
 )
+from qobuz_proxy.backends.music_assistant.manager import MusicAssistantManager
+from qobuz_proxy.backends.music_assistant.settings import MASettingsStore
 from qobuz_proxy.speaker import Speaker
 from qobuz_proxy.webui.config_writer import persist_speaker_uuids, save_config
 from qobuz_proxy.webui.routes import register_routes
@@ -131,6 +133,17 @@ class QobuzProxy:
         # slugified speaker name. Also keeps strong references to the tasks.
         self._speaker_retry_tasks: dict[str, asyncio.Task[None]] = {}
 
+        # Music Assistant players exposed as Qobuz Connect devices
+        self._ma_manager = MusicAssistantManager(
+            store=MASettingsStore(),
+            speaker_factory=self._make_ma_speaker,
+            reserved_ports=lambda: (
+                {self._config.server.http_port} | {s.http_port for s in self._config.speakers}
+            ),
+            yaml_speakers=lambda: self._config.speakers,
+            bind_address=self._config.server.bind_address,
+        )
+
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
@@ -141,6 +154,12 @@ class QobuzProxy:
 
         # 1. Start the HTTP server so the web UI is reachable immediately
         await self._start_web_server()
+
+        # Connect to Music Assistant early so the web UI can list its players
+        try:
+            await self._ma_manager.start()
+        except Exception as e:
+            logger.error(f"Music Assistant support failed to start: {e}", exc_info=True)
 
         # Persist identities before authentication or speaker startup, so an
         # offline renderer still keeps its UUID after a container recreation.
@@ -189,6 +208,7 @@ class QobuzProxy:
 
         self._is_running = False
         await self._cancel_auth_retry()
+        await self._ma_manager.stop()
         await self._stop_speakers()
         await self._stop_web_server()
         logger.info("qobuz-proxy stopped")
@@ -270,6 +290,7 @@ class QobuzProxy:
         self._auth_state["email"] = email
         self._auth_state["authenticated"] = True
         await self._start_speakers()
+        await self._ma_manager.set_qobuz_ready(True)
 
     async def _validate_saved_token(
         self,
@@ -385,6 +406,8 @@ class QobuzProxy:
         # Start speakers if not already running
         if not self._speakers:
             await self._start_speakers()
+        # Music Assistant devices pick up the new API client
+        await self._ma_manager.set_qobuz_ready(True, restart=True)
 
         return True
 
@@ -393,6 +416,7 @@ class QobuzProxy:
         logger.info("Logout requested — stopping speakers and clearing token")
         await self._cancel_auth_retry()
         await self._stop_speakers()
+        await self._ma_manager.set_qobuz_ready(False)
 
         self._auth_state["authenticated"] = False
         self._auth_state["user_id"] = ""
@@ -601,6 +625,16 @@ class QobuzProxy:
                 result.append(_configured_speaker_status(sc, "disconnected"))
         return result
 
+    def _make_ma_speaker(self, sc: SpeakerConfig, connection: Any) -> Speaker:
+        """Build the Speaker for one Music Assistant player."""
+        assert self._api_client is not None
+        return Speaker(
+            config=sc,
+            api_client=self._api_client,
+            app_id=self._app_id,
+            ma_connection=connection,
+        )
+
     # ------------------------------------------------------------------
     # Web server
     # ------------------------------------------------------------------
@@ -620,6 +654,7 @@ class QobuzProxy:
         self._web_app["on_add_speaker"] = self._on_add_speaker
         self._web_app["on_edit_speaker"] = self._on_edit_speaker
         self._web_app["on_remove_speaker"] = self._on_remove_speaker
+        self._web_app["ma_manager"] = self._ma_manager
         self._web_app["local_audio_enabled"] = os.environ.get(
             "QOBUZPROXY_LOCAL_AUDIO_UI", ""
         ).lower() in ("true", "1", "yes")
