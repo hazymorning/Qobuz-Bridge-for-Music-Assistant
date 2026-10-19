@@ -12,7 +12,7 @@ import time
 from typing import Awaitable, Callable, Optional, TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from qobuz_proxy.backends.base import AudioBackend
+from qobuz_proxy.backends.base import AudioBackend, ExternalPlaybackAware
 from qobuz_proxy.backends.types import (
     BackendInfo,
     BackendTrackMetadata,
@@ -75,7 +75,7 @@ def _format_ms(ms: int) -> str:
     return f"{seconds // 60}:{seconds % 60:02d}"
 
 
-class DLNABackend(AudioBackend):
+class DLNABackend(AudioBackend, ExternalPlaybackAware):
     """
     DLNA/UPnP audio backend.
 

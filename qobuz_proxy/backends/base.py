@@ -6,7 +6,7 @@ Defines the contract that all audio backends must implement.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 from .types import (
     BackendInfo,
@@ -25,6 +25,7 @@ TrackEndedCallback = Callable[[], None]
 PlaybackErrorCallback = Callable[[str], None]  # error_message
 NextTrackStartedCallback = Callable[[], None]
 PlaybackInterruptedCallback = Callable[[int], None]  # last position_ms
+VolumeChangeCallback = Callable[[int], None]  # level 0-100, changed on the device side
 
 
 class AudioBackend(ABC):
@@ -56,6 +57,7 @@ class AudioBackend(ABC):
         self._on_playback_error: Optional[PlaybackErrorCallback] = None
         self._on_next_track_started: Optional[NextTrackStartedCallback] = None
         self._on_playback_interrupted: Optional[PlaybackInterruptedCallback] = None
+        self._on_volume_change: Optional[VolumeChangeCallback] = None
 
     # =========================================================================
     # Playback Control - Required
@@ -137,6 +139,16 @@ class AudioBackend(ABC):
         """Get buffer status. Default returns OK."""
         return BufferStatus.OK
 
+    @property
+    def reports_external_resume(self) -> bool:
+        """Whether get_state() turning PLAYING while the player is paused is a real resume.
+
+        Backends whose device can be resumed by another controller (e.g. Music
+        Assistant's own UI) return True so the player follows that resume.
+        Default: False.
+        """
+        return False
+
     # =========================================================================
     # Gapless Playback - Optional
     # =========================================================================
@@ -202,6 +214,10 @@ class AudioBackend(ABC):
         """Register callback for playback errors."""
         self._on_playback_error = callback
 
+    def on_volume_change(self, callback: Optional[VolumeChangeCallback]) -> None:
+        """Register callback for volume changes made on the device side."""
+        self._on_volume_change = callback
+
     def on_playback_interrupted(self, callback: Optional[PlaybackInterruptedCallback]) -> None:
         """Register callback for the device stopping before the track ended.
 
@@ -264,6 +280,14 @@ class AudioBackend(ABC):
             except Exception as e:
                 logger.error(f"Playback interrupted callback error: {e}")
 
+    def _notify_volume_change(self, level: int) -> None:
+        """Notify listeners that the volume was changed on the device side."""
+        if self._on_volume_change:
+            try:
+                self._on_volume_change(level)
+            except Exception as e:
+                logger.error(f"Volume change callback error: {e}")
+
     def _notify_next_track_started(self) -> None:
         """Notify listeners that a gapless transition to the next track occurred."""
         if self._on_next_track_started:
@@ -283,3 +307,32 @@ class AudioBackend(ABC):
             name=self.name,
             device_id="",
         )
+
+
+class ExternalPlaybackAware(ABC):
+    """Mixin for backends that can tell when another source takes over their device.
+
+    The speaker wires these hooks so the proxy leaves the Qobuz session instead of
+    fighting the other source, and only takes the device back on a new selection
+    in the Qobuz app.
+    """
+
+    @abstractmethod
+    def on_external_playback(self, callback: Callable[[], Awaitable[None]]) -> None:
+        """Register the async callback run when another source takes over."""
+        ...
+
+    @abstractmethod
+    def prepare_for_selection(self) -> None:
+        """Forget a takeover before the Qobuz app selects this device again."""
+        ...
+
+    @abstractmethod
+    async def check_external_playback(self) -> bool:
+        """Re-check ownership now; True if another source owns the device."""
+        ...
+
+    @abstractmethod
+    async def can_apply_remote_state(self) -> bool:
+        """Whether a SET_STATE snapshot from the Qobuz app may be applied now."""
+        ...

@@ -8,7 +8,7 @@ run concurrently, one per physical audio device.
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from aiohttp import web
 
@@ -21,6 +21,7 @@ from qobuz_proxy.config import (
     DLNAConfig,
     LocalConfig,
     LoggingConfig,
+    MusicAssistantConfig,
     QobuzConfig,
     ServerConfig,
     SpeakerConfig,
@@ -37,6 +38,7 @@ from qobuz_proxy.playback import (
     VolumeCommandHandler,
 )
 from qobuz_proxy.backends import AudioBackend, BackendFactory, PlaybackState
+from qobuz_proxy.backends.base import ExternalPlaybackAware
 from qobuz_proxy.playback.play_reporter import PlayReporter
 from qobuz_proxy.playback.state_reporter import PlaybackStateReport, wire_playing_state
 from qobuz_proxy.backends.dlna import AudioProxyServer, DLNABackend, MetadataServiceURLProvider
@@ -59,6 +61,7 @@ class Speaker:
         api_client: QobuzAPIClient,
         app_id: str,
         web_app: Optional[web.Application] = None,
+        ma_connection: Optional[Any] = None,
     ) -> None:
         """
         Initialize Speaker.
@@ -68,11 +71,14 @@ class Speaker:
             api_client: Authenticated Qobuz API client (shared across speakers)
             app_id: Qobuz application ID (shared across speakers)
             web_app: Optional shared aiohttp Application for discovery routes
+            ma_connection: Shared Music Assistant connection (music_assistant backend only)
         """
         self._config = config
         self._api_client = api_client
         self._app_id = app_id
         self._web_app = web_app
+        self._ma_connection = ma_connection
+        self._volume_tasks: set[asyncio.Task[None]] = set()
 
         self._is_running: bool = False
         self._ws_connected_event: asyncio.Event = asyncio.Event()
@@ -160,6 +166,8 @@ class Speaker:
         elif self._config.backend_type == "local":
             config_dict["audio_device"] = self._config.audio_device
             config_dict["buffer_size"] = self._config.audio_buffer_size
+        elif self._config.backend_type == "music_assistant":
+            config_dict["ma_player_id"] = self._config.ma_player_id
 
         return {
             "id": slugify_name(self._config.name),
@@ -201,6 +209,7 @@ class Speaker:
                     device=self._config.audio_device,
                     buffer_size=self._config.audio_buffer_size,
                 ),
+                music_assistant=MusicAssistantConfig(player_id=self._config.ma_player_id),
             ),
             server=ServerConfig(
                 http_port=self._config.http_port,
@@ -225,7 +234,9 @@ class Speaker:
 
             # 2. Create audio backend
             logger.debug(f"[{self.name}] Creating audio backend...")
-            backend = await BackendFactory.create_from_config(component_config)
+            backend = await BackendFactory.create_from_config(
+                component_config, ma_connection=self._ma_connection
+            )
             self._backend = backend
             logger.info(f"[{self.name}] Connected to backend: {backend.name}")
 
@@ -263,6 +274,15 @@ class Speaker:
                             f"[{self.name}] Capability discovery unavailable, "
                             f"using fallback quality: CD (FLAC 16/44)"
                         )
+                elif self._config.backend_type == "music_assistant":
+                    # MA streams with its own Qobuz quality setting; the proxy's
+                    # URL lookup only checks that the track is available.
+                    self._effective_quality = 27
+                    self._quality_source = "auto"
+                    logger.info(
+                        f"[{self.name}] Music Assistant backend: Music Assistant streams with "
+                        f"its own Qobuz quality; using Hi-Res (24/192) for availability checks"
+                    )
                 else:
                     # Local backend: default to Hi-Res 192k
                     self._effective_quality = 27
@@ -295,16 +315,25 @@ class Speaker:
             # 6. Create queue and player
             logger.debug(f"[{self.name}] Creating queue and player...")
             self._queue = QobuzQueue()
+            # Music Assistant's Qobuz provider reports streams to Qobuz itself,
+            # so a second report from the proxy would count every play twice.
+            play_reporter = (
+                None
+                if self._config.backend_type == "music_assistant"
+                else PlayReporter(self._api_client)
+            )
             self._player = QobuzPlayer(
                 queue=self._queue,
                 metadata_service=self._metadata_service,
                 backend=backend,
-                play_reporter=PlayReporter(self._api_client),
+                play_reporter=play_reporter,
             )
             if isinstance(backend, DLNABackend):
                 self._player.set_fixed_volume_mode(self._config.dlna_fixed_volume)
+            if isinstance(backend, ExternalPlaybackAware):
                 self._player.set_playback_permission_check(backend.can_apply_remote_state)
                 backend.on_external_playback(self._on_external_playback)
+            backend.on_volume_change(self._on_device_volume_change)
 
             # 7. Create and start discovery service
             logger.debug(f"[{self.name}] Starting discovery service...")
@@ -404,6 +433,15 @@ class Speaker:
         logger.info(f"[{self.name}] Qobuz app connected, setting up WebSocket...")
         asyncio.create_task(self._setup_websocket(tokens))
 
+    def _on_device_volume_change(self, level: int) -> None:
+        """Report a volume change made on the device (e.g. in Music Assistant) to the app."""
+        if not self._player:
+            return
+        logger.info(f"[{self.name}] Volume changed on the device: {level}%")
+        task = asyncio.create_task(self._player.broadcast_current_volume())
+        self._volume_tasks.add(task)
+        task.add_done_callback(self._volume_tasks.discard)
+
     async def _on_external_playback(self) -> None:
         """Release cloud ownership before ending the old Qobuz listening session."""
         if self._discovery:
@@ -420,7 +458,7 @@ class Speaker:
 
         async with self._ws_setup_lock:
             try:
-                if isinstance(self._backend, DLNABackend):
+                if isinstance(self._backend, ExternalPlaybackAware):
                     await self._backend.check_external_playback()
                     self._backend.prepare_for_selection()
                 if self._discovery:

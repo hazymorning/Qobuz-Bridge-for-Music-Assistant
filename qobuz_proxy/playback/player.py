@@ -1268,6 +1268,7 @@ class QobuzPlayer:
                 artwork_url=meta.get("artwork_url", "") if meta else "",
                 sample_rate=sample_rate,
                 bit_depth=bit_depth,
+                start_position_ms=start_position_ms,
             )
 
             # Log now playing with actual quality (0 = cache miss, fall back to max quality)
@@ -1871,7 +1872,14 @@ class QobuzPlayer:
                     # Require consecutive STOPPED polls before trusting it —
                     # get_state() reports STOPPED on a transient read failure, and
                     # one bad poll must not end a normal paused listen.
-                    if await self.backend.get_state() == PlaybackState.STOPPED:
+                    backend_state = await self.backend.get_state()
+                    if (
+                        backend_state == PlaybackState.PLAYING
+                        and self.backend.reports_external_resume is True
+                    ):
+                        # Resumed on the device side (e.g. Music Assistant's UI)
+                        await self._follow_external_resume()
+                    elif backend_state == PlaybackState.STOPPED:
                         self._paused_stop_polls += 1
                         if self._paused_stop_polls >= _PAUSED_STOP_CONFIRMATIONS:
                             self._paused_stop_polls = 0
@@ -1895,6 +1903,21 @@ class QobuzPlayer:
             except Exception as e:
                 logger.error(f"Playback monitor error: {e}")
                 await asyncio.sleep(1.0)
+
+    async def _follow_external_resume(self) -> None:
+        """Mirror a resume that happened on the device, not from the Qobuz app."""
+        self._paused_stop_polls = 0
+        if not self._current_track:
+            return
+        position = await self.backend.get_position()
+        if self._state != PlaybackState.PAUSED:
+            return
+        self._state = PlaybackState.PLAYING
+        self._set_position(position)
+        logger.info("Playback resumed on the device")
+        await self._send_state_update()
+        # Same bookkeeping as an app-driven resume: continue the existing listen.
+        await self._report_playing(self._position_value_ms)
 
     async def _state_update_loop(self) -> None:
         """Periodic state updates (heartbeat)."""

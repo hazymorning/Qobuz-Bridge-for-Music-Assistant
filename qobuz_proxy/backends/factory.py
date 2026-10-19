@@ -5,7 +5,7 @@ Provides factory methods to instantiate backends by type name.
 """
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from qobuz_proxy.config import Config
 
@@ -57,8 +57,14 @@ class BackendFactory:
     """
 
     @classmethod
-    async def create_from_config(cls, config: Config) -> AudioBackend:
-        """Create a backend based on configuration."""
+    async def create_from_config(
+        cls, config: Config, ma_connection: Optional[Any] = None
+    ) -> AudioBackend:
+        """Create a backend based on configuration.
+
+        ``ma_connection`` is the shared Music Assistant connection, used only by
+        the ``music_assistant`` backend.
+        """
         backend_type = config.backend.type
 
         # Check if type is available
@@ -85,6 +91,12 @@ class BackendFactory:
             return await cls.create_local(
                 device=config.backend.local.device,
                 buffer_size=config.backend.local.buffer_size,
+            )
+        elif backend_type == "music_assistant":
+            return await cls.create_music_assistant(
+                connection=ma_connection,
+                player_id=config.backend.music_assistant.player_id,
+                name=config.device.name,
             )
         else:
             # Generic instantiation for registered backends
@@ -172,6 +184,24 @@ class BackendFactory:
         raise BackendNotFoundError("Failed to initialize local audio backend")
 
     @classmethod
+    async def create_music_assistant(
+        cls,
+        connection: Optional[Any],
+        player_id: str,
+        name: Optional[str] = None,
+    ) -> AudioBackend:
+        """Create a Music Assistant backend for one MA player or group."""
+        if connection is None:
+            raise BackendNotFoundError("Music Assistant is not set up")
+        # Lazy import: needs the optional music-assistant extra (Python 3.13+)
+        from qobuz_proxy.backends.music_assistant.backend import MusicAssistantBackend
+
+        backend = MusicAssistantBackend(connection, player_id, name=name)
+        if await backend.connect():
+            return backend
+        raise BackendNotFoundError(f"Failed to set up Music Assistant player {player_id}")
+
+    @classmethod
     def list_available_backends(cls) -> list[str]:
         """List available backend types."""
         return BackendRegistry.available_types()
@@ -187,3 +217,11 @@ try:
     BackendRegistry.register("local", LocalAudioBackend)
 except ImportError:
     pass  # sounddevice not installed
+
+# Register Music Assistant backend (needs the optional music-assistant extra)
+try:
+    from qobuz_proxy.backends.music_assistant.backend import MusicAssistantBackend
+
+    BackendRegistry.register("music_assistant", MusicAssistantBackend)
+except ImportError:
+    pass  # music-assistant-client not installed

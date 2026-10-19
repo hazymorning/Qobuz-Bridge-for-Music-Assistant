@@ -51,6 +51,9 @@ class BackendTrackMetadata:
     artwork_url: str = ""
     sample_rate: int = 0  # Hz, e.g. 44100, 96000, 192000
     bit_depth: int = 0  # e.g. 16, 24
+    # Where playback will start. Backends that can start mid-track in one step
+    # may use it; the player still calls seek() afterwards.
+    start_position_ms: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
