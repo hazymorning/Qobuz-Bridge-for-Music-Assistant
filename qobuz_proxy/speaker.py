@@ -40,6 +40,7 @@ from qobuz_proxy.playback import (
 from qobuz_proxy.backends import AudioBackend, BackendFactory, PlaybackState
 from qobuz_proxy.backends.base import ExternalPlaybackAware
 from qobuz_proxy.playback.play_reporter import PlayReporter
+from qobuz_proxy.playback.volume_handler import MSG_TYPE_SRVR_CTRL_VOLUME_CHANGED
 from qobuz_proxy.playback.state_reporter import PlaybackStateReport, wire_playing_state
 from qobuz_proxy.backends.dlna import AudioProxyServer, DLNABackend, MetadataServiceURLProvider
 
@@ -433,6 +434,20 @@ class Speaker:
         logger.info(f"[{self.name}] Qobuz app connected, setting up WebSocket...")
         asyncio.create_task(self._setup_websocket(tokens))
 
+    def _dispatch_volume(self, msg_type: int, msg: object) -> None:
+        """Hand a volume message to the volume handler."""
+        if (
+            msg_type == MSG_TYPE_SRVR_CTRL_VOLUME_CHANGED
+            and self._config.backend_type == "music_assistant"
+            and not (self._ws_manager and self._ws_manager.is_renderer_active)
+        ):
+            # Several Music Assistant devices share one Qobuz session and this
+            # broadcast carries no renderer id we can match: only the active
+            # device applies it, so one volume change can't reach every speaker.
+            return
+        if self._volume_handler:
+            asyncio.create_task(self._volume_handler.handle_message(msg_type, msg))
+
     def _on_device_volume_change(self, level: int) -> None:
         """Report a volume change made on the device (e.g. in Music Assistant) to the app."""
         if not self._player or not (self._ws_manager and self._ws_manager.is_renderer_active):
@@ -525,12 +540,7 @@ class Speaker:
                     )
 
                 for msg_type in self._volume_handler.get_message_types():
-                    self._ws_manager.register_handler(
-                        msg_type,
-                        lambda mt, msg, h=self._volume_handler: asyncio.create_task(
-                            h.handle_message(mt, msg)
-                        ),
-                    )
+                    self._ws_manager.register_handler(msg_type, self._dispatch_volume)
 
                 # Register error handler (message type 1 = MESSAGE_TYPE_ERROR)
                 self._ws_manager.register_handler(
