@@ -73,6 +73,9 @@ NEXT_ARM_DELAY_SECONDS = 1.5
 NEXT_RETRY_COOLDOWN_SECONDS = 5.0
 # Keep the queued next track this long for play() after stop(next_track_id=...).
 JUMP_WAIT_SECONDS = 3.0
+# After our pause/resume/play, wait this long for MA to report it before trusting MA's state
+# again (a real speaker can take seconds to confirm, and MA keeps reporting the old state).
+EXPECT_STATE_SECONDS = 10.0
 # Coalesce device-side volume changes; ignore MA's echoes this long after we set one.
 VOLUME_DEBOUNCE_SECONDS = 0.3
 VOLUME_SETTLE_SECONDS = 1.5
@@ -143,6 +146,8 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         self._adopt_seek_until = 0.0
         self._adopt_position_ms = 0
         self._session_prepared = False
+        self._expected_state: Optional[MAPlaybackState] = None
+        self._expected_until = 0.0
 
         self._failed_next: set[tuple[str, int]] = set()
         self._next_retry_after = 0.0
@@ -466,6 +471,7 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
             await self._conn.call(
                 f"player_queues/pause queue={qid}", lambda c: c.player_queues.pause(qid)
             )
+            self._expect(MAPlaybackState.PAUSED)
         self._paused_hold = True
         self._notify_state_change(PlaybackState.PAUSED)
 
@@ -521,6 +527,7 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         self._attached = True
         self._ma_state = MAPlaybackState.PLAYING
         self._play_started_at = time.monotonic()
+        self._expect(MAPlaybackState.PLAYING)
         self._notify_state_change(PlaybackState.PLAYING)
         asyncio.get_running_loop().call_soon(self._evaluate)
 
@@ -606,6 +613,7 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
             raise RuntimeError("Cannot seek: Music Assistant is not playing this Qobuz track")
         qid = self._player_id
         seconds = int(round(position_ms / 1000))
+        was_paused = self._paused_hold
         self._cancel_timer("_idle_timer")
         self._busy += 1
         try:
@@ -614,8 +622,15 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
                 lambda c: c.player_queues.seek(qid, seconds),
                 timeout=PLAY_TIMEOUT_SECONDS,
             )
+            if was_paused:
+                # MA starts playing when a paused queue seeks; keep it paused
+                await self._conn.call(
+                    f"player_queues/pause queue={qid} (stay paused after seek)",
+                    lambda c: c.player_queues.pause(qid),
+                )
         finally:
             self._busy -= 1
+        self._expect(MAPlaybackState.PAUSED if was_paused else MAPlaybackState.PLAYING)
         # MA restarts the stream to seek; don't read that as a stop
         self._play_started_at = time.monotonic()
         self._last_seek_target = position_ms
@@ -705,6 +720,14 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         queue = self._our_queue()
         if queue is None:
             return self._state
+        expected = self._pending_expectation()
+        if expected is not None and queue.state != expected:
+            # MA has not caught up with our last command yet
+            return (
+                PlaybackState.PAUSED
+                if expected == MAPlaybackState.PAUSED
+                else (PlaybackState.PLAYING)
+            )
         if queue.state == MAPlaybackState.PLAYING:
             return PlaybackState.PLAYING
         if queue.state == MAPlaybackState.PAUSED or self._paused_hold:
@@ -1075,6 +1098,16 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         if not self._attached:
             self._ma_state = state
             return
+        expected = self._pending_expectation()
+        if expected is not None:
+            if state == expected or (
+                expected == MAPlaybackState.PAUSED and state == MAPlaybackState.IDLE
+            ):
+                self._expected_state = None  # MA confirmed our command
+            else:
+                # Still the state from before our command: wait for MA to catch up
+                self._schedule_reevaluate(self._expected_until - time.monotonic() + 0.1)
+                return
         if state == MAPlaybackState.PAUSED:
             if not self._paused_hold:
                 logger.info("[%s] MA: paused in Music Assistant", self.name)
@@ -1085,6 +1118,8 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
                 logger.info("[%s] MA: playing again in Music Assistant", self.name)
             self._paused_hold = False
             self._cancel_timer("_idle_timer")
+            # Playing again after an MA action (e.g. a seek): a later idle is not its doing
+            self._last_play_action_at = 0.0
             self._check_stall(queue)
         elif state == MAPlaybackState.IDLE:
             if in_grace:
@@ -1281,6 +1316,7 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         self._external = False
         self._play_started_at = time.monotonic()
         self._ma_state = MAPlaybackState.PLAYING
+        self._expect(MAPlaybackState.PLAYING)
         self._save_session()
 
     def _forget_current(self) -> None:
@@ -1370,6 +1406,16 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         if duration <= 0 or self._furthest_position_ms <= 0:
             return True  # unknown: treat as an end so the queue never stalls
         return duration - self._furthest_position_ms <= END_MARGIN_MS
+
+    def _expect(self, state: MAPlaybackState) -> None:
+        """Our command should bring MA to ``state``; ignore MA's older reports until then."""
+        self._expected_state = state
+        self._expected_until = time.monotonic() + EXPECT_STATE_SECONDS
+
+    def _pending_expectation(self) -> Optional[MAPlaybackState]:
+        if self._expected_state is not None and time.monotonic() >= self._expected_until:
+            self._expected_state = None
+        return self._expected_state
 
     def _in_grace(self) -> bool:
         return self._grace_left() > 0
