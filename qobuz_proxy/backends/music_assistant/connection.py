@@ -467,16 +467,16 @@ class MusicAssistantConnection:
             server_info = getattr(client, "server_info", None)
             version = str(getattr(server_info, "server_version", "") or "")
             qobuz = self._qobuz_provider_available(client)
-            players = len(self.list_players())
-            logger.info(
-                f"Connected to Music Assistant {version} at {self._url} ({players} players"
-                f"{', Qobuz provider ready' if qobuz else ', no Qobuz provider'})"
-            )
             self._set_state(
                 MAConnectionState.CONNECTED,
                 f"Connected to Music Assistant {version}.".replace("  ", " "),
                 server_version=version,
                 qobuz_provider=qobuz,
+            )
+            logger.info(
+                f"Connected to Music Assistant {version} at {self._url} "
+                f"({len(self.list_players())} players"
+                f"{', Qobuz provider ready' if qobuz else ', no Qobuz provider'})"
             )
             try:
                 await listen
