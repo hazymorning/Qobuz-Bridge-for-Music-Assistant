@@ -45,6 +45,11 @@ local = [
     "numpy>=1.24.0",
     "soundfile>=0.12.1",
 ]
+# Optional runtime feature: the Music Assistant backend. The official client
+# needs Python 3.13+, so the extra is empty on older interpreters.
+music-assistant = [
+    "music-assistant-client>=1.6.0,<2; python_version >= '3.13'",
+]
 
 # Development tooling (PEP 735 dependency group). uv installs the `dev` group
 # by default on `uv sync` — see [tool.uv].default-groups below.
@@ -86,6 +91,13 @@ quote-style = "double"
 python_version = "3.10"
 warn_return_any = true
 warn_unused_ignores = true
+
+# The Music Assistant packages need Python 3.13 and use syntax mypy rejects
+# when targeting 3.10, so their types are not followed (they become Any).
+[[tool.mypy.overrides]]
+module = ["music_assistant_client", "music_assistant_client.*", "music_assistant_models", "music_assistant_models.*"]
+follow_imports = "skip"
+follow_untyped_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
