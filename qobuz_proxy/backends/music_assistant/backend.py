@@ -499,10 +499,14 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
             and queue.current_item is not None
             and queue.current_item.queue_item_id == current.item_id
         ):
-            if queue.state == MAPlaybackState.PLAYING:
+            # MA's queue state lags the speaker by ~0.5 s: right after our own pause
+            # (e.g. the re-pause after a seek) the queue still says playing
+            player = self._conn.get_player(qid)
+            speaker_paused = getattr(player, "playback_state", None) == MAPlaybackState.PAUSED
+            if queue.state == MAPlaybackState.PLAYING and not speaker_paused:
                 self._resumed()
                 return True
-            if queue.state == MAPlaybackState.PAUSED or (
+            if queue.state in (MAPlaybackState.PAUSED, MAPlaybackState.PLAYING) or (
                 queue.state == MAPlaybackState.IDLE and not queue.ended
             ):
                 self._busy += 1
