@@ -157,3 +157,14 @@ Reproduce a reported bug live before you change code. Then confirm the fix with 
 ## Docker
 
 Uses `network_mode: host` (required for mDNS). Ports: 8689 (HTTP discovery), 7120 (audio proxy). See `docker-compose.yaml` and `.env.example`.
+
+## Music Assistant backend and Home Assistant add-on (this fork)
+
+This fork adds a third backend, `music_assistant`, and packages the project as a Home Assistant add-on. Design notes: `docs/music-assistant.md`.
+
+- **Code**: `qobuz_proxy/backends/music_assistant/` — `connection.py` (one shared websocket to MA via `music-assistant-client`, reconnects, token handling), `backend.py` (one `MusicAssistantBackend` per exposed MA player/group), `manager.py` (exposes MA players as Speakers, stable UUIDs/ports), `settings.py` (MA settings + per-player sessions in the data dir), `supervisor.py` (finds MA under the HA Supervisor). Web API: `qobuz_proxy/webui/ma_routes.py`; panel script: `webui/static/ma.js`.
+- **Dependency**: the optional extra `music-assistant` (Python 3.13+ only). `uv sync --all-extras` installs it on 3.13. Code that imports the MA packages must stay lazily imported; everything else must keep working on 3.10. mypy does not follow the MA packages (see `pyproject.toml`).
+- **Ownership rules** (keep them when changing the backend): MA queue items we created are "ours". Only while *attached* (the Qobuz app plays through us) may MA events make the player advance (`track_ended`, `next_track_started`). MA idle must settle for `IDLE_SETTLE_SECONDS`, and an idle right after an MA play action is a stop, never a track end. Anything foreign on the queue while attached releases the Qobuz session (`ExternalPlaybackAware`) and the backend sends MA nothing more until `prepare_for_selection()`.
+- **Tests**: `tests/backends/fake_music_assistant.py` is an in-memory MA 2.10.7 server driving the real client (only the websocket is swapped). Time only moves via `advance_time`; `settle()` never sleeps, so patch the backend's timing constants. `tests/conftest.py` keeps MA settings out of your real data dir.
+- **Add-on**: the repository root *is* the add-on (the Supervisor builds only from the add-on folder): `config.json` (JSON so it doesn't clash with the app's `config.yaml`), `Dockerfile.amd64`/`Dockerfile.aarch64` (preferred over the upstream `Dockerfile`; keep them identical), `rootfs/run.sh`, `rootfs/addon_init.py`, `repository.yaml`, `translations/`, `DOCS.md`. Never add a tracked `config.{yaml,yml,json}` or any `build.{yaml,yml,json}` elsewhere in the tree. Bump `version` in `config.json` for HA to offer an update.
+- **Merging upstream**: `git fetch upstream && git merge upstream/main`. Expect conflicts only in `README.md` (keep ours; the upstream README lives in `docs/qobuz-proxy.md`) and the few additive hooks in `speaker.py`, `player.py`, `config.py`, `app.py` and the web UI files.
