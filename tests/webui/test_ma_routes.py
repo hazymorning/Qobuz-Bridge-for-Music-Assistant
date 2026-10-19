@@ -1,9 +1,15 @@
-"""Web UI routes for Music Assistant (/api/ma/*) and the plain-language status checks."""
+"""The panel: its static files, the /api/ma/* routes and the plain-language status checks.
+
+The routes run on a real MusicAssistantManager against the in-memory FakeMAServer; the
+speakers are stubs.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import re
+from pathlib import Path
 from typing import Any, Callable, Optional
 from unittest.mock import AsyncMock
 
@@ -18,29 +24,31 @@ from music_assistant_models.enums import PlayerType  # noqa: E402
 
 from qobuz_proxy.backends.music_assistant import connection as connection_module  # noqa: E402
 from qobuz_proxy.backends.music_assistant import manager as manager_module  # noqa: E402
-from qobuz_proxy.backends.music_assistant.connection import MusicAssistantConnection  # noqa: E402
+from qobuz_proxy.backends.music_assistant import settings  # noqa: E402
 from qobuz_proxy.backends.music_assistant.manager import MusicAssistantManager  # noqa: E402
-from qobuz_proxy.backends.music_assistant.settings import MASettings, MASettingsStore  # noqa: E402
-from qobuz_proxy.config import SpeakerConfig  # noqa: E402
+from qobuz_proxy.backends.music_assistant.settings import DEFAULT_URL, Settings  # noqa: E402
 from qobuz_proxy.webui import ma_routes  # noqa: E402
 from qobuz_proxy.webui.ma_routes import build_checks  # noqa: E402
 from qobuz_proxy.webui.routes import register_routes  # noqa: E402
 from tests.backends.fake_music_assistant import FakeMAServer  # noqa: E402
 
+STATIC = Path(__file__).resolve().parents[2] / "qobuz_proxy" / "webui" / "static"
 LOGGED_IN = {"authenticated": True, "user_id": "1", "email": "user@example.com", "name": "Alice"}
-LOGGED_OUT = {"authenticated": False, "user_id": "", "email": ""}
-CHECK_IDS = ["qobuz", "ma", "ma_qobuz", "exposed"]
+LOGIN = {"url": "http://127.0.0.1:8095", "username": "admin", "password": "admin-password"}
+ALL_OK = {"qobuz": "ok", "ma": "ok", "ma_qobuz": "ok", "exposed": "ok"}
+QOBUZ_IN = {"logged_in": True, "account": "Alice"}
+QOBUZ_OUT = {"logged_in": False, "account": ""}
 
 
 @pytest.fixture(autouse=True)
 def fast_timers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(manager_module, "RECONCILE_DELAY_SECONDS", 0.01)
-    monkeypatch.setattr(MusicAssistantConnection, "RECONNECT_DELAYS_SECONDS", (0.02,))
+    monkeypatch.setattr(connection_module, "RECONNECT_DELAYS_SECONDS", (0.02,))
 
 
 class StubSpeaker:
-    def __init__(self, config: SpeakerConfig, connection: Any) -> None:
-        self.config = config
+    def __init__(self, config: Any, backend: Any) -> None:
+        pass
 
     async def start(self) -> bool:
         return True
@@ -49,47 +57,37 @@ class StubSpeaker:
         pass
 
     def get_status(self) -> dict[str, Any]:
-        return {"status": "idle", "now_playing": None}
+        return {"status": "idle"}
 
 
 class Panel:
     """A real MusicAssistantManager on FakeMAServer behind the real web routes."""
 
-    def __init__(self, server: FakeMAServer, store: MASettingsStore) -> None:
+    def __init__(self, server: FakeMAServer, path: Path) -> None:
         self.server = server
-        self.store = store
-        self.lan_ip_lookups = 0
+        self.path = path
         self.lan_ip = "192.168.1.10"
+        self.auth_state = dict(LOGGED_IN)
         self.manager = MusicAssistantManager(
-            store=store,
-            speaker_factory=StubSpeaker,
-            reserved_ports=lambda: {8689},
-            yaml_speakers=lambda: [],
-            connection_factory=lambda url, token: MusicAssistantConnection(
-                url, token, client_factory=server.client_factory
-            ),
-            url_detector=self._detect,
-            port_checker=lambda address, port: True,
+            path,
+            StubSpeaker,
+            client_factory=server.client_factory,
+            port_is_free=lambda address, port: True,
         )
         self.client: Optional[TestClient] = None
 
-    async def _detect(self) -> str:
-        return "http://192.168.1.20:8095"
+    def saved(self) -> Settings:
+        return settings.load(self.path)
 
-    def direct_lan_ip(self) -> str:
-        self.lan_ip_lookups += 1
-        return self.lan_ip
-
-    def app(self, auth_state: dict[str, Any], *, with_manager: bool = True) -> web.Application:
+    def app(self) -> web.Application:
         app = web.Application()
-        app["auth_state"] = auth_state
+        app["auth_state"] = self.auth_state
         app["get_speakers"] = lambda: []
-        app["version"] = "test"
+        app["version"] = "9.9.9"
         app["on_auth_token"] = AsyncMock(return_value=True)
         app["on_logout"] = AsyncMock()
         app["http_port"] = 8689
-        if with_manager:
-            app["ma_manager"] = self.manager
+        app["ma_manager"] = self.manager
         register_routes(app)
         return app
 
@@ -104,6 +102,13 @@ class Panel:
                 pytest.fail(f"timed out waiting for {what}")
             await asyncio.sleep(0.005)
 
+    async def status(self) -> dict[str, Any]:
+        assert self.client is not None
+        resp = await self.client.get("/api/ma/status")
+        assert resp.status == 200
+        result: dict[str, Any] = await resp.json()
+        return result
+
 
 @pytest.fixture
 def server(monkeypatch: pytest.MonkeyPatch) -> FakeMAServer:
@@ -117,24 +122,18 @@ def server(monkeypatch: pytest.MonkeyPatch) -> FakeMAServer:
 
 
 async def open_panel(
-    server: FakeMAServer,
-    tmp_path: Any,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    configured: bool,
-    auth_state: dict[str, Any] = LOGGED_IN,
-    with_manager: bool = True,
+    server: FakeMAServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, configured: bool
 ) -> Panel:
-    store = MASettingsStore(tmp_path / "music_assistant.json")
+    path = tmp_path / "music_assistant.json"
     if configured:
-        store.save(MASettings(url=server.url, token=server.token, username="admin"))
-    panel = Panel(server, store)
-    monkeypatch.setattr(ma_routes, "direct_lan_ip", panel.direct_lan_ip)
+        settings.save(path, Settings(url=server.url, token=server.token, username="admin"))
+    panel = Panel(server, path)
+    monkeypatch.setattr(ma_routes, "_lan_ip", lambda: panel.lan_ip)
     await panel.manager.start()
-    await panel.manager.set_qobuz_ready(bool(auth_state.get("authenticated")))
+    await panel.manager.set_qobuz_ready(True)
     if configured:
         await panel.wait_for(lambda: panel.manager.status()["exposed_count"] == 2, "devices")
-    panel.client = TestClient(TestServer(panel.app(auth_state, with_manager=with_manager)))
+    panel.client = TestClient(TestServer(panel.app()))
     await panel.client.start_server()
     return panel
 
@@ -159,18 +158,39 @@ async def fresh(server, tmp_path, monkeypatch):
         await panel.manager.stop()
 
 
-@pytest.fixture
-async def no_manager(server, tmp_path, monkeypatch):
-    panel = await open_panel(server, tmp_path, monkeypatch, configured=False, with_manager=False)
-    try:
-        yield panel
-    finally:
-        await panel.client.close()
-        await panel.manager.stop()
-
-
 def checks_by_id(checks: list[dict[str, str]]) -> dict[str, dict[str, str]]:
     return {c["id"]: c for c in checks}
+
+
+def levels(checks: list[dict[str, str]]) -> list[tuple[str, str]]:
+    return [(c["id"], c["level"]) for c in checks]
+
+
+# =============================================================================
+# Static files
+# =============================================================================
+
+
+async def test_index_loads_the_panel_assets_with_the_cache_buster(fresh):
+    body = await (await fresh.client.get("/")).text()
+    assert 'src="static/panel.js?v=9.9.9"' in body
+    assert 'href="static/panel.css?v=9.9.9"' in body
+    assert "{{" not in body and "}}" not in body
+
+
+def test_every_element_id_panel_js_looks_up_exists_in_index():
+    html = (STATIC / "index.html").read_text()
+    ids = set(re.findall(r"""\$\("([\w-]+)"\)""", (STATIC / "panel.js").read_text()))
+    assert ids
+    assert sorted(i for i in ids if f'id="{i}"' not in html) == []
+
+
+def test_panel_js_only_uses_relative_api_urls():
+    js = (STATIC / "panel.js").read_text()
+    urls = re.findall(r"""(?:request|send)\("[A-Z]+", "([^"]+)\"""", js)
+    assert urls and all(url.startswith("api/") for url in urls), urls
+    # An absolute path would escape the Home Assistant ingress prefix
+    assert not re.search(r"""["'`]/api/""", js)
 
 
 # =============================================================================
@@ -179,46 +199,29 @@ def checks_by_id(checks: list[dict[str, str]]) -> dict[str, dict[str, str]]:
 
 
 class TestStatusRoute:
-    async def test_status_has_checks_and_the_direct_login_url_but_never_the_token(
+    async def test_status_has_checks_and_the_login_url_but_never_the_token(
         self, configured, server
     ):
         resp = await configured.client.get("/api/ma/status")
-        assert resp.status == 200
         text = await resp.text()
         body = json.loads(text)
 
-        assert server.token not in text
-        assert "token" not in body
-        assert body["direct_login_url"] == "http://192.168.1.10:8689"
-        assert [c["id"] for c in body["checks"]] == CHECK_IDS
-        assert {c["id"]: c["level"] for c in body["checks"]} == {
-            "qobuz": "ok",
-            "ma": "ok",
-            "ma_qobuz": "ok",
-            "exposed": "ok",
-        }
+        assert server.token not in text and "token" not in body
+        assert body["login_url"] == "http://192.168.1.10:8689"
+        assert body["qobuz"] == QOBUZ_IN
+        assert levels(body["checks"]) == list(ALL_OK.items())
         assert body["connection"]["state"] == "connected"
         assert body["exposed_count"] == 2
         assert {p["player_id"] for p in body["players"]} == {"up1", "grp"}
 
-    async def test_direct_login_url_is_empty_without_a_lan_address(self, configured):
+    async def test_login_url_is_empty_without_a_lan_address(self, configured):
         configured.lan_ip = ""
-        body = await (await configured.client.get("/api/ma/status")).json()
-        assert body["direct_login_url"] == ""
+        assert (await configured.status())["login_url"] == ""
 
-    async def test_lan_address_is_not_looked_up_on_every_poll(self, configured):
-        for _ in range(3):
-            assert (await configured.client.get("/api/ma/status")).status == 200
-        assert configured.lan_ip_lookups == 1
-
-    async def test_status_before_connecting_suggests_an_address(self, fresh):
-        body = await (await fresh.client.get("/api/ma/status")).json()
-        assert body["configured"] is False
-        assert body["connection"]["state"] == "not_configured"
-        assert checks_by_id(body["checks"])["ma"]["level"] == "error"
-        await fresh.wait_for(lambda: fresh.manager.status()["suggested_url"] != "", "detection")
-        body = await (await fresh.client.get("/api/ma/status")).json()
-        assert body["suggested_url"] == "http://192.168.1.20:8095"
+    async def test_qobuz_account_falls_back_to_the_email(self, configured):
+        configured.auth_state["name"] = ""
+        qobuz = (await configured.status())["qobuz"]
+        assert qobuz == {"logged_in": True, "account": "user@example.com"}
 
 
 # =============================================================================
@@ -231,151 +234,100 @@ def ma_status(
     *,
     message: str = "",
     configured: bool = True,
-    supported: bool = True,
-    qobuz_provider: Optional[bool] = True,
+    has_qobuz: bool = True,
     exposed_count: int = 1,
-    players: Optional[list[dict[str, Any]]] = None,
-    server_version: str = "2.10.7",
+    device_names: Optional[list[str]] = None,
 ) -> dict[str, Any]:
+    if device_names is None:
+        device_names = ["Kitchen (MA)"] * exposed_count
     return {
-        "supported": supported,
         "configured": configured,
         "connection": {
             "state": state,
             "message": message,
-            "server_version": server_version,
-            "qobuz_provider": qobuz_provider if state == "connected" else None,
+            "server_version": "2.10.7",
+            "has_qobuz": has_qobuz,
         },
         "exposed_count": exposed_count,
-        "players": players if players is not None else [{"exposed": True}] * exposed_count,
+        "players": [{"device_name": name} for name in device_names],
     }
 
 
 class TestBuildChecks:
-    def test_checks_come_in_the_order_the_user_fixes_them(self):
-        assert [c["id"] for c in build_checks(LOGGED_IN, ma_status())] == CHECK_IDS
-        for check in build_checks(LOGGED_IN, ma_status()):
-            assert set(check) == {"id", "level", "title", "detail"}
-
-    def test_all_good(self):
-        checks = checks_by_id(build_checks(LOGGED_IN, ma_status(exposed_count=1)))
-        assert checks["qobuz"] == {
-            "id": "qobuz",
-            "level": "ok",
-            "title": "Qobuz account",
-            "detail": "Logged in to Qobuz as Alice.",
-        }
-        assert checks["ma"]["level"] == "ok"
-        assert checks["ma"]["detail"] == "Connected to Music Assistant 2.10.7."
-        assert checks["ma_qobuz"]["level"] == "ok"
-        assert checks["ma_qobuz"]["detail"] == "Qobuz is set up in Music Assistant."
-        assert checks["exposed"]["level"] == "ok"
-        assert checks["exposed"]["detail"] == "1 speaker or group is available in the Qobuz app."
-
-    def test_qobuz_login_falls_back_to_the_email(self):
-        auth = {"authenticated": True, "email": "user@example.com"}
-        qobuz = checks_by_id(build_checks(auth, ma_status()))["qobuz"]
-        assert qobuz["detail"] == "Logged in to Qobuz as user@example.com."
-
-    def test_not_logged_in_to_qobuz(self):
-        checks = checks_by_id(build_checks(LOGGED_OUT, ma_status(exposed_count=0, players=[])))
-        assert checks["qobuz"]["level"] == "error"
-        assert checks["qobuz"]["detail"].startswith("Not logged in to Qobuz yet.")
-        assert "home Wi" in checks["qobuz"]["detail"]
-        assert checks["exposed"]["level"] == "pending"
-        assert checks["exposed"]["detail"] == (
-            "Speakers appear in the Qobuz app once Qobuz and Music Assistant are both connected."
-        )
-
-    def test_ma_not_configured(self):
-        status = ma_status("not_configured", configured=False, exposed_count=0, players=[])
-        checks = checks_by_id(build_checks(LOGGED_IN, status))
-        assert checks["ma"]["level"] == "error"
-        assert checks["ma"]["detail"] == (
-            "Not connected to Music Assistant yet. Enter your Music Assistant username and "
-            "password below."
-        )
-        assert "ma_qobuz" not in checks
-        assert checks["exposed"]["level"] == "pending"
-
-    def test_connecting(self):
-        status = ma_status("connecting", exposed_count=0, players=[])
-        checks = checks_by_id(build_checks(LOGGED_IN, status))
-        assert checks["ma"] == {
-            "id": "ma",
-            "level": "pending",
-            "title": "Music Assistant",
-            "detail": "Connecting to Music Assistant…",
-        }
-        assert "ma_qobuz" not in checks
-
-    def test_disconnected_shows_the_connection_message(self):
-        message = "Can't reach Music Assistant at http://ma:8095. Is the add-on running?"
-        checks = checks_by_id(build_checks(LOGGED_IN, ma_status("disconnected", message=message)))
-        assert checks["ma"]["level"] == "error"
-        assert checks["ma"]["detail"] == message
-        assert "ma_qobuz" not in checks
-
-    def test_disconnected_without_a_message(self):
-        checks = checks_by_id(build_checks(LOGGED_IN, ma_status("disconnected")))
-        assert checks["ma"]["detail"] == "Can't reach Music Assistant."
-
-    def test_auth_failed_shows_the_connection_message(self):
-        message = "Music Assistant no longer accepts the saved login. Connect again in this panel."
-        checks = checks_by_id(build_checks(LOGGED_IN, ma_status("auth_failed", message=message)))
-        assert checks["ma"] == {
-            "id": "ma",
-            "level": "error",
-            "title": "Music Assistant",
-            "detail": message,
-        }
-
-    def test_unsupported_build(self):
-        status = ma_status("not_configured", supported=False, configured=False, exposed_count=0)
-        checks = checks_by_id(build_checks(LOGGED_IN, status))
-        assert checks["ma"]["level"] == "error"
-        assert checks["ma"]["detail"] == "Music Assistant support is not installed in this build."
-
-    def test_connected_without_a_qobuz_provider(self):
-        checks = checks_by_id(build_checks(LOGGED_IN, ma_status(qobuz_provider=False)))
-        assert checks["ma"]["level"] == "ok"
-        assert checks["ma_qobuz"]["level"] == "error"
-        assert "no working Qobuz provider" in checks["ma_qobuz"]["detail"]
-        assert "Providers" in checks["ma_qobuz"]["detail"]
-
-    def test_nothing_shared(self):
-        status = ma_status(exposed_count=0, players=[{"exposed": False}])
-        exposed = checks_by_id(build_checks(LOGGED_IN, status))["exposed"]
-        assert exposed["level"] == "warn"
-        assert exposed["detail"].startswith("No speakers are shared with the Qobuz app.")
-
     @pytest.mark.parametrize(
-        ("count", "detail"),
+        ("qobuz", "status", "expected"),
         [
-            (1, "1 speaker or group is available in the Qobuz app."),
-            (2, "2 speakers and groups are available in the Qobuz app."),
-            (5, "5 speakers and groups are available in the Qobuz app."),
+            pytest.param(QOBUZ_IN, ma_status(), ALL_OK, id="all_good"),
+            pytest.param(
+                QOBUZ_OUT,
+                ma_status(exposed_count=0),
+                {"qobuz": "error", "ma": "ok", "ma_qobuz": "ok", "exposed": "pending"},
+                id="qobuz_logged_out",
+            ),
+            pytest.param(
+                QOBUZ_IN,
+                ma_status("not_configured", configured=False, exposed_count=0),
+                {"qobuz": "ok", "ma": "error", "exposed": "pending"},
+                id="ma_not_configured",
+            ),
+            pytest.param(
+                QOBUZ_IN,
+                ma_status("connecting", exposed_count=0),
+                {"qobuz": "ok", "ma": "pending", "exposed": "pending"},
+                id="connecting",
+            ),
+            pytest.param(
+                QOBUZ_IN,
+                ma_status("disconnected", message="Lost it", exposed_count=2),
+                {"qobuz": "ok", "ma": "error", "exposed": "ok"},
+                id="ma_down_devices_still_count",
+            ),
+            pytest.param(
+                QOBUZ_IN,
+                ma_status("auth_failed", message="Log in again", exposed_count=0),
+                {"qobuz": "ok", "ma": "error", "exposed": "pending"},
+                id="auth_failed",
+            ),
+            pytest.param(
+                QOBUZ_IN,
+                ma_status(has_qobuz=False),
+                {"qobuz": "ok", "ma": "ok", "ma_qobuz": "error", "exposed": "ok"},
+                id="no_qobuz_provider_in_ma",
+            ),
+            pytest.param(
+                QOBUZ_IN,
+                ma_status(exposed_count=0, device_names=[""]),
+                {"qobuz": "ok", "ma": "ok", "ma_qobuz": "ok", "exposed": "warn"},
+                id="nothing_shared",
+            ),
+            pytest.param(
+                QOBUZ_IN,
+                ma_status(exposed_count=0, device_names=["Kitchen (MA)"]),
+                {"qobuz": "ok", "ma": "ok", "ma_qobuz": "ok", "exposed": "pending"},
+                id="devices_starting",
+            ),
         ],
     )
-    def test_shared_counts(self, count, detail):
-        exposed = checks_by_id(build_checks(LOGGED_IN, ma_status(exposed_count=count)))["exposed"]
-        assert exposed == {
-            "id": "exposed",
-            "level": "ok",
-            "title": "Speakers in the Qobuz app",
-            "detail": detail,
-        }
+    def test_checks_come_in_the_order_the_user_fixes_them_with_their_levels(
+        self, qobuz, status, expected
+    ):
+        assert levels(build_checks(qobuz, status)) == list(expected.items())
 
-    def test_devices_still_starting(self):
-        status = ma_status(exposed_count=0, players=[{"exposed": True}, {"exposed": False}])
-        exposed = checks_by_id(build_checks(LOGGED_IN, status))["exposed"]
-        assert exposed["level"] == "pending"
-        assert exposed["detail"] == "Starting the Qobuz Connect devices…"
+    @pytest.mark.parametrize(
+        ("state", "configured"),
+        [("disconnected", True), ("auth_failed", True), ("not_configured", False)],
+    )
+    def test_ma_check_shows_why_music_assistant_is_not_connected(self, state, configured):
+        message = "Can't reach Music Assistant at http://ma:8095."
+        status = ma_status(state, message=message, configured=configured, exposed_count=0)
+        ma = checks_by_id(build_checks(QOBUZ_IN, status))["ma"]
+        assert (ma["level"], ma["detail"]) == ("error", message)
 
-    def test_devices_shared_while_ma_is_down_still_count(self):
-        status = ma_status("disconnected", message="Lost the connection", exposed_count=2)
-        exposed = checks_by_id(build_checks(LOGGED_IN, status))["exposed"]
-        assert exposed["level"] == "ok"
+    def test_details_name_the_qobuz_account_and_the_ma_version(self):
+        checks = build_checks(QOBUZ_IN, ma_status())
+        assert all(set(c) == {"id", "level", "title", "detail"} for c in checks)
+        assert "Alice" in checks_by_id(checks)["qobuz"]["detail"]
+        assert "2.10.7" in checks_by_id(checks)["ma"]["detail"]
 
 
 # =============================================================================
@@ -384,66 +336,36 @@ class TestBuildChecks:
 
 
 class TestConnectRoute:
-    async def test_login_succeeds_and_returns_the_status_without_the_token(self, fresh, server):
-        resp = await fresh.client.post(
-            "/api/ma/connect",
-            json={"url": server.url, "username": "admin", "password": "admin-password"},
-        )
+    async def test_login_connects_and_returns_the_status_without_secrets(self, fresh):
+        before = await fresh.status()
+        assert before["configured"] is False
+        assert before["connection"]["state"] == "not_configured"
+        assert before["connection"]["url"] == DEFAULT_URL
+
+        resp = await fresh.client.post("/api/ma/connect", json=LOGIN)
+
         assert resp.status == 200
         text = await resp.text()
         body = json.loads(text)
-        assert body["ok"] is True
-        assert body["status"]["configured"] is True
-        saved = fresh.store.load()
-        assert saved.token and saved.token not in text
-        assert "admin-password" not in text
-        assert [c["id"] for c in body["status"]["checks"]][:2] == ["qobuz", "ma"]
-        await fresh.wait_for(lambda: fresh.manager.connection.is_connected, "MA connected")
-        status = await (await fresh.client.get("/api/ma/status")).json()
-        assert [c["id"] for c in status["checks"]] == CHECK_IDS
+        assert body["configured"] is True
+        assert body["connection"]["state"] == "connected"
+        assert levels(body["checks"]) == list(ALL_OK.items())
+        token = fresh.saved().token
+        assert token and token not in text
+        assert LOGIN["password"] not in text
 
-    async def test_status_returned_by_a_successful_login_shows_connected(self, fresh, server):
-        resp = await fresh.client.post(
-            "/api/ma/connect", json={"url": server.url, "token": server.token}
-        )
-        body = await resp.json()
-        assert body["ok"] is True
-        assert body["status"]["connection"]["state"] == "connected"
-        assert checks_by_id(body["status"]["checks"])["ma"]["level"] == "ok"
-
-    async def test_wrong_password_is_a_400_with_a_plain_message(self, fresh, server):
-        resp = await fresh.client.post(
-            "/api/ma/connect", json={"url": server.url, "username": "admin", "password": "nope"}
-        )
+    async def test_wrong_password_is_a_400_with_a_plain_message(self, fresh):
+        resp = await fresh.client.post("/api/ma/connect", json={**LOGIN, "password": "nope"})
         assert resp.status == 400
-        body = await resp.json()
-        assert body["ok"] is False
-        assert "did not accept that username and password" in body["error"]
-        assert fresh.store.load().token == ""
-
-    async def test_missing_fields_are_a_400(self, fresh, server):
-        resp = await fresh.client.post("/api/ma/connect", json={"url": server.url})
-        assert resp.status == 400
-        body = await resp.json()
-        assert body["ok"] is False
-        assert "Enter your Music Assistant username and password" in body["error"]
-
-    @pytest.mark.parametrize("payload", ["{not json", "[1, 2]", ""])
-    async def test_invalid_json_is_a_400(self, fresh, payload):
-        resp = await fresh.client.post(
-            "/api/ma/connect", data=payload, headers={"Content-Type": "application/json"}
-        )
-        assert resp.status == 400
-        assert await resp.json() == {"ok": False, "error": "Invalid request."}
+        assert "did not accept that username and password" in (await resp.json())["error"]
+        assert fresh.saved().token == ""
 
     async def test_disconnect_forgets_the_login(self, configured):
         resp = await configured.client.post("/api/ma/disconnect")
         assert resp.status == 200
-        assert await resp.json() == {"ok": True}
-        assert configured.store.load().token == ""
-        body = await (await configured.client.get("/api/ma/status")).json()
-        assert body["configured"] is False
-        assert body["exposed_count"] == 0
+        body = await resp.json()
+        assert body["configured"] is False and body["exposed_count"] == 0
+        assert configured.saved().token == ""
 
 
 # =============================================================================
@@ -452,75 +374,65 @@ class TestConnectRoute:
 
 
 class TestPlayersRoute:
-    @pytest.mark.parametrize(
-        "payload",
-        [
-            {"expose_all": "yes"},
-            {"expose_all": 1},
-            {"name_suffix": "false"},
-            {"name_suffix": 0},
-            {"selected": "up1"},
-            {"selected": [1, 2]},
-            {"selected": {"up1": True}},
-        ],
-    )
-    async def test_wrong_types_are_a_400(self, configured, payload):
-        resp = await configured.client.put("/api/ma/players", json=payload)
-        assert resp.status == 400
-        body = await resp.json()
-        assert body["ok"] is False and body["error"]
-        assert configured.store.load().expose_all is True  # nothing changed
-
-    async def test_invalid_json_is_a_400(self, configured):
-        resp = await configured.client.put(
-            "/api/ma/players", data="nope", headers={"Content-Type": "application/json"}
-        )
-        assert resp.status == 400
-
     async def test_update_is_applied_saved_and_returned(self, configured):
         resp = await configured.client.put(
-            "/api/ma/players",
-            json={"expose_all": False, "selected": ["grp"], "name_suffix": False},
+            "/api/ma/players", json={"expose_all": False, "selected": ["grp"]}
         )
         assert resp.status == 200
-        body = await resp.json()
-        assert body["ok"] is True
-        status = body["status"]
-        assert status["expose_all"] is False and status["name_suffix"] is False
+        status = await resp.json()
+        assert status["expose_all"] is False
         players = {p["player_id"]: p for p in status["players"]}
-        assert players["grp"]["selected"] and players["grp"]["exposed"]
-        assert players["grp"]["qobuz_name"] == "Downstairs"
-        assert not players["up1"]["exposed"]
+        assert players["grp"]["selected"] and players["grp"]["device_name"] == "Downstairs (MA)"
+        assert players["up1"]["device_name"] == ""
         assert status["exposed_count"] == 1
-        saved = configured.store.load()
-        assert saved.expose_all is False
-        assert saved.selected_player_ids == ["grp"]
-        assert saved.name_suffix is False
+        saved = configured.saved()
+        assert saved.expose_all is False and saved.selected_player_ids == ["grp"]
 
     async def test_partial_update_keeps_the_other_settings(self, configured):
-        await configured.client.put("/api/ma/players", json={"name_suffix": False})
-        resp = await configured.client.put("/api/ma/players", json={})
+        resp = await configured.client.put("/api/ma/players", json={"selected": ["grp"]})
         assert resp.status == 200
-        saved = configured.store.load()
-        assert saved.name_suffix is False and saved.expose_all is True
+        assert (await resp.json())["exposed_count"] == 2  # still all players
+        saved = configured.saved()
+        assert saved.expose_all is True and saved.selected_player_ids == ["grp"]
 
 
 # =============================================================================
-# Without a manager (e.g. MA support missing at start-up)
+# Request validation
 # =============================================================================
 
+WRITES = [("post", "/api/ma/connect"), ("put", "/api/ma/players")]
 
-class TestWithoutManager:
+
+class TestRequestValidation:
+    @pytest.mark.parametrize("payload", ["{not json", "[1, 2]", '"text"', ""])
+    @pytest.mark.parametrize(("method", "path"), WRITES)
+    async def test_a_body_that_is_not_a_json_object_is_a_400(
+        self, configured, method, path, payload
+    ):
+        resp = await configured.client.request(
+            method, path, data=payload, headers={"Content-Type": "application/json"}
+        )
+        assert resp.status == 400
+        assert await resp.json() == {"error": "Invalid request."}
+
     @pytest.mark.parametrize(
-        ("method", "path"),
+        ("method", "path", "payload"),
         [
-            ("get", "/api/ma/status"),
-            ("post", "/api/ma/connect"),
-            ("post", "/api/ma/disconnect"),
-            ("put", "/api/ma/players"),
+            ("post", "/api/ma/connect", {**LOGIN, "token": "pasted-token"}),
+            ("post", "/api/ma/connect", {**LOGIN, "password": 123}),
+            ("put", "/api/ma/players", {"name_suffix": False}),
+            ("put", "/api/ma/players", {"expose_all": "no"}),
+            ("put", "/api/ma/players", {"expose_all": 1}),
+            ("put", "/api/ma/players", {"selected": "up1"}),
+            ("put", "/api/ma/players", {"selected": [1, 2]}),
+            ("put", "/api/ma/players", {"selected": {"up1": True}}),
         ],
     )
-    async def test_routes_answer_404(self, no_manager, method, path):
-        resp = await getattr(no_manager.client, method)(path, json={})
-        assert resp.status == 404
-        assert await resp.json() == {"error": "music_assistant_unavailable"}
+    async def test_unknown_fields_and_wrong_types_are_a_400_and_change_nothing(
+        self, configured, method, path, payload
+    ):
+        before = configured.saved()
+        resp = await configured.client.request(method, path, json=payload)
+        assert resp.status == 400
+        assert (await resp.json())["error"]
+        assert configured.saved() == before

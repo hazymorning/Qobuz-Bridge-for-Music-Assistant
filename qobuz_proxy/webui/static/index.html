@@ -5,163 +5,80 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="dark">
     <base href="{{base}}">
-    <script>window.QOBUZ_DIRECT_PORT = "{{http_port}}";</script>
     <title>Qobuz Bridge</title>
     <link rel="stylesheet" href="static/style.css?v={{version}}">
+    <link rel="stylesheet" href="static/panel.css?v={{version}}">
 </head>
-<body>
-    <div class="container">
-        <header class="ma-header">
-            <h1>Qobuz Bridge</h1>
-            <p class="ma-subtitle">Play from the Qobuz app on your Music Assistant players and groups.</p>
-        </header>
+<body data-port="{{http_port}}">
+<main class="container">
+    <h1>Qobuz Bridge</h1>
+    <p class="subtitle">Play from the Qobuz app on your Music Assistant players and groups.</p>
 
-        <!-- Status checks (filled by ma.js from api/ma/status) -->
-        <section class="card ma-only" id="ma-status-card" aria-labelledby="ma-status-title">
-            <h2 id="ma-status-title">Status</h2>
-            <div role="status" aria-live="polite">
-                <ul id="ma-checks" class="check-list"></ul>
-            </div>
-            <p id="ma-offline" class="ma-message ma-message-warn" role="alert" hidden>Can't reach the add-on right now. Retrying&hellip;</p>
-        </section>
+    <section class="card" aria-labelledby="status-title">
+        <h2 id="status-title">Status</h2>
+        <ul id="checks" class="checks" role="status" aria-live="polite"></ul>
+        <p id="offline" class="message" role="alert" hidden>Can't reach the add-on right now. Retrying…</p>
+    </section>
 
-        <!-- 1 · Qobuz account (shown/hidden by app.js) -->
-        <section class="card" id="qobuz-card" aria-labelledby="qobuz-title">
-            <h2 id="qobuz-title"><span class="ma-step ma-only" aria-hidden="true">1</span>Qobuz account</h2>
+    <section class="card" aria-labelledby="qobuz-title">
+        <h2 id="qobuz-title">1. Qobuz account</h2>
+        <div id="qobuz-logged-out">
+            <p>Log in with your Qobuz account so the add-on can play what you pick in the Qobuz app.</p>
+            <button type="button" id="qobuz-login">Log in to Qobuz</button>
+            <p id="qobuz-login-note" class="note" hidden>
+                Do this on your phone while it is on your home Wi‑Fi. The login opens
+                <a id="qobuz-login-link" target="_blank" rel="noopener noreferrer"></a> in a new tab;
+                it does not work through Nabu Casa or other remote access. Come back here when you are done.
+            </p>
+        </div>
+        <div id="qobuz-logged-in" hidden>
+            <p>Logged in as <strong id="qobuz-account"></strong>.</p>
+            <button type="button" id="qobuz-logout" class="button-secondary">Log out</button>
+        </div>
+    </section>
 
-            <div id="auth-disconnected">
-                <p>Log in with your Qobuz account so the add-on can play what you pick in the Qobuz app.</p>
-                <div id="login-error" class="error-message" style="display: none;"></div>
-                <button type="button" class="ma-button" onclick="startLogin()">Log in to Qobuz</button>
-                <div id="ma-login-hint" class="ma-hint" hidden></div>
-            </div>
+    <section class="card" aria-labelledby="ma-title">
+        <h2 id="ma-title">2. Music Assistant</h2>
+        <div id="ma-connected" hidden>
+            <p id="ma-connected-text"></p>
+            <button type="button" id="ma-disconnect" class="button-secondary">Disconnect</button>
+        </div>
+        <form id="ma-form" novalidate hidden>
+            <p id="ma-message" class="message" hidden></p>
+            <label for="ma-url">Address</label>
+            <input id="ma-url" type="text" inputmode="url" autocomplete="off" autocapitalize="off"
+                   spellcheck="false">
+            <label for="ma-username">Music Assistant username</label>
+            <input id="ma-username" type="text" autocomplete="username" autocapitalize="off"
+                   spellcheck="false">
+            <label for="ma-password">Password</label>
+            <input id="ma-password" type="password" autocomplete="current-password">
+            <p id="ma-error" class="error-message" role="alert" hidden></p>
+            <button type="submit" id="ma-connect">Connect</button>
+            <p class="note">This is your Music Assistant login, not your Qobuz or Home Assistant
+                password. If you only ever open Music Assistant from the Home Assistant sidebar, set a
+                password for your user in Music Assistant first (your user profile).</p>
+        </form>
+    </section>
 
-            <div id="auth-connected" style="display: none;">
-                <div class="auth-user">
-                    <img id="auth-avatar" class="auth-avatar" src="" alt="" style="display: none;">
-                    <div class="auth-user-info">
-                        <strong id="auth-name"></strong>
-                        <span id="auth-email" class="auth-email"></span>
-                    </div>
-                    <button type="button" class="button-secondary ma-button" onclick="logout()">Log out</button>
-                </div>
-            </div>
-        </section>
+    <section class="card" aria-labelledby="players-title">
+        <h2 id="players-title">3. Speakers in the Qobuz app</h2>
+        <label class="switch">
+            <input type="checkbox" id="expose-all">
+            <span>All my Music Assistant players</span>
+        </label>
+        <p class="note">New players are added automatically; players hidden in Music Assistant are
+            left out. Switch this off to pick players yourself.</p>
+        <p id="players-error" class="error-message" role="alert" hidden></p>
+        <ul id="players" class="players" aria-label="Music Assistant players"></ul>
+        <p id="players-empty" class="note" hidden></p>
+    </section>
 
-        <!-- 2 · Music Assistant (ma.js) -->
-        <section class="card ma-only" id="ma-card" aria-labelledby="ma-title">
-            <h2 id="ma-title"><span class="ma-step" aria-hidden="true">2</span>Music Assistant</h2>
-
-            <div id="ma-unsupported" class="ma-message ma-message-error" hidden></div>
-
-            <div id="ma-connected" hidden>
-                <p id="ma-connected-text" class="ma-connected-text"></p>
-                <button type="button" id="ma-disconnect-btn" class="button-secondary ma-button">Disconnect</button>
-            </div>
-
-            <div id="ma-connect" hidden>
-                <div id="ma-conn-message" class="ma-message" role="status" hidden></div>
-                <!-- saved login that is only reconnecting: keep the form folded away -->
-                <div id="ma-saved-actions" class="ma-actions" hidden>
-                    <button type="button" id="ma-change-btn" class="button-secondary ma-button"
-                            aria-controls="ma-connect-form" aria-expanded="false">Change address or login</button>
-                    <button type="button" id="ma-forget-btn-2" class="button-secondary ma-button">Disconnect</button>
-                </div>
-                <form id="ma-connect-form" class="ma-form" novalidate>
-                    <h3>Connect to Music Assistant</h3>
-                    <div class="ma-field">
-                        <label for="ma-url">Address</label>
-                        <input id="ma-url" name="url" type="text" inputmode="url" autocomplete="off"
-                               autocapitalize="off" autocorrect="off" spellcheck="false"
-                               aria-describedby="ma-url-note">
-                        <p id="ma-url-note" class="ma-note">Found automatically &mdash; usually leave this as it is.</p>
-                    </div>
-                    <div id="ma-cred-fields">
-                        <div class="ma-field">
-                            <label for="ma-username">Music Assistant username</label>
-                            <input id="ma-username" name="username" type="text" autocomplete="username"
-                                   autocapitalize="off" autocorrect="off" spellcheck="false">
-                        </div>
-                        <div class="ma-field">
-                            <label for="ma-password">Password</label>
-                            <input id="ma-password" name="password" type="password" autocomplete="current-password">
-                        </div>
-                    </div>
-                    <div id="ma-token-fields" class="ma-field" hidden>
-                        <label for="ma-token">Long-lived token</label>
-                        <textarea id="ma-token" name="token" rows="3" autocomplete="off" autocapitalize="off"
-                                  autocorrect="off" spellcheck="false" aria-describedby="ma-token-note"></textarea>
-                        <p id="ma-token-note" class="ma-note">Create one in Music Assistant, in your user profile, and paste it here.</p>
-                    </div>
-                    <button type="button" id="ma-token-toggle" class="ma-link" aria-expanded="false"
-                            aria-controls="ma-token-fields ma-cred-fields">use a token instead</button>
-                    <div id="ma-connect-error" class="error-message" role="alert" hidden></div>
-                    <div class="ma-actions">
-                        <button type="submit" id="ma-connect-btn" class="ma-button">Connect</button>
-                        <button type="button" id="ma-forget-btn" class="button-secondary ma-button" hidden>Disconnect</button>
-                    </div>
-                    <p class="ma-help">This is your Music Assistant login &mdash; not your Qobuz or Home Assistant
-                        password. If you only ever open Music Assistant from the Home Assistant sidebar you may not
-                        have a password yet: set one in Music Assistant (your user profile), or create a long-lived
-                        token there and use a token instead.</p>
-                </form>
-            </div>
-        </section>
-
-        <!-- 3 · Speakers in the Qobuz app (ma.js) -->
-        <section class="card ma-only" id="ma-players-card" aria-labelledby="ma-players-title">
-            <h2 id="ma-players-title"><span class="ma-step" aria-hidden="true">3</span>Speakers in the Qobuz app</h2>
-            <div id="ma-toggles">
-                <label class="toggle" for="ma-expose-all">
-                    <span class="toggle-text">
-                        <span class="toggle-label">All my Music Assistant players</span>
-                        <span class="toggle-sub">New players are added automatically</span>
-                    </span>
-                    <input type="checkbox" id="ma-expose-all" role="switch">
-                    <span class="toggle-switch" aria-hidden="true"></span>
-                </label>
-                <label class="toggle" for="ma-name-suffix">
-                    <span class="toggle-text">
-                        <span class="toggle-label">Add (MA) to the names</span>
-                        <span class="toggle-sub">Helps tell them apart from speakers with built-in Qobuz Connect, like a WiiM</span>
-                    </span>
-                    <input type="checkbox" id="ma-name-suffix" role="switch">
-                    <span class="toggle-switch" aria-hidden="true"></span>
-                </label>
-            </div>
-            <p id="ma-players-note" class="ma-note ma-players-note" hidden></p>
-            <div id="ma-players-error" class="error-message" role="alert" hidden></div>
-            <ul id="ma-players" class="ma-players" aria-label="Music Assistant players"></ul>
-            <p id="ma-players-empty" class="ma-empty" hidden></p>
-        </section>
-
-        <!-- Upstream DLNA / local speakers (app.js), tucked away -->
-        <details id="other-speakers" class="ma-details">
-            <summary>Other speakers (DLNA / local audio)</summary>
-            <p class="ma-note ma-details-note ma-only">Only for speakers that are not in Music Assistant. Most people don't need this.</p>
-            <div class="card" id="speakers-section">
-                <div class="speakers-header">
-                    <h2>Speakers</h2>
-                    <button id="add-speaker-btn" onclick="showAddSpeaker()" style="display: none;">+ Add Speaker</button>
-                </div>
-                <div id="speakers-list">
-                    <p class="muted">Waiting for authentication...</p>
-                </div>
-                <div id="add-speaker-panel" style="display: none;"></div>
-                <div id="speaker-error" class="error-message" style="display: none;"></div>
-            </div>
-        </details>
-
-        <footer class="ma-footer">
-            <span id="system-version">--</span>
-            <span aria-hidden="true">&middot;</span>
-            <span>up <span id="system-uptime">--</span></span>
-            <span aria-hidden="true">&middot;</span>
-            <a href="https://github.com/hazymorning/Qobuz-Bridge-for-Music-Assistant#readme" target="_blank" rel="noopener noreferrer">Help</a>
-        </footer>
-    </div>
-
-    <script src="static/app.js?v={{version}}"></script>
-    <script src="static/ma.js?v={{version}}"></script>
+    <footer class="footer">
+        <a href="https://github.com/hazymorning/Qobuz-Bridge-for-Music-Assistant#readme"
+           target="_blank" rel="noopener noreferrer">Help</a>
+    </footer>
+</main>
+<script src="static/panel.js?v={{version}}"></script>
 </body>
 </html>

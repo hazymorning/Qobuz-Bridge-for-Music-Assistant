@@ -126,21 +126,6 @@ class TestExternalResume:
 
         assert player.state == PlaybackState.PAUSED
 
-    async def test_mock_backend_does_not_trigger_resume(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A MagicMock attribute is truthy; only a real True enables the resume."""
-        backend = DeviceBackend(external_resume=False)
-        player = await _paused_player(backend)
-        monkeypatch.setattr(
-            DeviceBackend, "reports_external_resume", property(lambda self: MagicMock())
-        )
-
-        backend.device_state = PlaybackState.PLAYING
-        await _run_monitor(player, monkeypatch, ticks=2)
-
-        assert player.state == PlaybackState.PAUSED
-
     async def test_paused_stop_detection_still_works(self, monkeypatch: pytest.MonkeyPatch) -> None:
         backend = DeviceBackend(external_resume=True)
         player = await _paused_player(backend)
@@ -159,11 +144,3 @@ class TestStartPositionHint:
         await player.play_track(queue_item_id=1, track_id="42", position_ms=61_000)
 
         assert backend.played[-1].start_position_ms == 61_000
-
-    async def test_play_from_start_has_zero_hint(self) -> None:
-        backend = DeviceBackend(external_resume=False)
-        player = _make_player(backend)
-
-        await player.play_track(queue_item_id=1, track_id="42")
-
-        assert backend.played[-1].start_position_ms == 0

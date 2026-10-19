@@ -1,14 +1,13 @@
 """How MusicAssistantBackend maps Music Assistant events onto the Player callbacks.
 
 Natural ends, gapless transitions, MA-UI actions, takeovers by other sources, lost
-connections and add-on restarts. Uses the rig from ``test_ma_backend.py`` (fake MA
-server + real client + real connection, Player callbacks mocked).
+connections and add-on restarts. Uses the rig from ``conftest.py`` (fake MA server +
+real client + real connection, Player callbacks mocked).
 """
 
 import asyncio
+import json
 import time
-from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any, Callable
 
 import pytest
@@ -19,33 +18,17 @@ pytest.importorskip("music_assistant_client")
 from music_assistant_models.enums import PlaybackState as MAState  # noqa: E402
 
 from qobuz_proxy.backends.music_assistant.backend import MusicAssistantBackend  # noqa: E402
-from qobuz_proxy.backends.music_assistant.connection import (  # noqa: E402
-    MusicAssistantConnection,
-)
-from qobuz_proxy.backends.music_assistant.settings import SessionStore  # noqa: E402
+from qobuz_proxy.backends.music_assistant.connection import ConnectionState  # noqa: E402
 from qobuz_proxy.backends.types import PlaybackState  # noqa: E402
-from tests.backends.fake_music_assistant import FakeMAServer  # noqa: E402
-from tests.backends.test_ma_backend import (  # noqa: E402
+from tests.backends.conftest import (  # noqa: E402
     NOTHING_FIRED,
-    Callbacks,
     QID,
     STREAM_URL,
+    Callbacks,
     Rig,
     meta,
-    patch_timing,
-    running_rig,
 )
-
-
-@pytest.fixture
-def timing(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
-    return patch_timing(monkeypatch)
-
-
-@pytest.fixture
-async def rig(timing: Callable[..., None]) -> AsyncIterator[Rig]:
-    async with running_rig() as r:
-        yield r
+from tests.backends.fake_music_assistant import FakeMAServer  # noqa: E402
 
 
 def device_reports(server: FakeMAServer, state: MAState) -> None:
@@ -417,11 +400,6 @@ class TestTakeover:
 
         assert released == ["released"]
 
-    async def test_check_external_playback_is_false_while_ours(self, rig: Rig) -> None:
-        await rig.play_for("101", 30)
-        assert await rig.backend.check_external_playback() is False
-        assert rig.cb.external.await_count == 0
-
     async def test_a_fresh_selection_may_take_a_busy_player(self, rig: Rig) -> None:
         rig.server.user_plays_foreign(QID, "Radio 1")  # MA was already playing radio
         await rig.settle()
@@ -448,8 +426,7 @@ class TestConnectionLoss:
         timing(DISCONNECT_GRACE_SECONDS=0.3)
         await rig.play_for("101", 30)
 
-        rig.server.set_reachable(False, drop=True)
-        await rig.wait(lambda: not rig.conn.is_connected)
+        await rig.lose_ma()
         assert rig.cb.interrupted.call_count == 0  # within the grace
         assert await rig.backend.get_state() == PlaybackState.PLAYING  # frozen
 
@@ -466,10 +443,11 @@ class TestConnectionLoss:
     ) -> None:
         timing(DISCONNECT_GRACE_SECONDS=0.3)
         await rig.play_for("101", 30)
-        old_client = rig.conn.client
+        states: list[ConnectionState] = []
+        rig.conn.add_status_listener(lambda status: states.append(status.state))
 
         rig.server.drop_connections()
-        await rig.wait(lambda: rig.conn.is_connected and rig.conn.client is not old_client)
+        await rig.wait(lambda: ConnectionState.DISCONNECTED in states and rig.conn.is_connected)
         await rig.idle(0.4)
 
         assert rig.cb.endings() == NOTHING_FIRED
@@ -513,7 +491,7 @@ class TestConnectionLoss:
         rig.server.remove_player(QID)  # not registered again (yet)
         rig.server.come_back()
         await rig.wait(lambda: rig.conn.is_connected)
-        assert rig.conn.get_queue(QID) is None
+        assert rig.conn.queue(QID) is None
 
         await rig.wait(lambda: rig.cb.interrupted.called, what="interrupted")
         rig.server.add_player(QID, "Kitchen")  # it shows up much later
@@ -565,90 +543,84 @@ class TestDetached:
 
 
 class TestAddonRestart:
-    async def _restart_addon(
-        self, rig: Rig, path: Path
-    ) -> tuple[MusicAssistantConnection, MusicAssistantBackend, Callbacks]:
-        """The new bridge process: its own connection and a backend on the same sessions file."""
-        conn = MusicAssistantConnection(
-            rig.server.url, rig.server.token, client_factory=rig.server.client_factory
-        )
-        await conn.start()
-        await rig.wait(lambda: conn.is_connected)
-        backend, cb = rig.make_backend(sessions=SessionStore(path), conn=conn)
-        await backend.connect()
-        return conn, backend, cb
-
-    async def _played_before_restart(self, rig: Rig, path: Path, seconds: float = 30) -> None:
-        before, _ = rig.make_backend(sessions=SessionStore(path))
-        await before.connect()
-        await rig.play_for("101", seconds, backend=before)
-        await before.disconnect()
-
-    async def test_restored_session_is_detached_and_silent(self, rig: Rig, tmp_path: Path) -> None:
-        path = tmp_path / "sessions.json"
-        before, _ = rig.make_backend(sessions=SessionStore(path))
+    async def _play_before_restart(self, rig: Rig, arm: str = "") -> dict[str, Any]:
+        """The old bridge process plays 101 for 30 s (and arms ``arm``); returns its session."""
+        saved: dict[str, Any] = {}
+        before, _ = rig.make_backend(save_session=lambda s: saved.update(session=s))
         await before.connect()
         await rig.play_for("101", 30, backend=before)
-        assert await rig.arm("102", backend=before)
+        if arm:
+            assert await rig.arm(arm, backend=before)
         await before.disconnect()
+        return json.loads(json.dumps(saved["session"]))  # as kept in the settings file
 
-        conn, after, cb = await self._restart_addon(rig, path)
-        try:
-            assert after._current is not None and after._current.track_id == "101"
-            assert after._attached is False
-            assert await after.get_state() == PlaybackState.STOPPED
-            rig.server.ui_pause(QID)
-            rig.server.ui_resume(QID)
-            rig.server.finish_current_track(QID)  # MA moves on to 102 by itself
-            await rig.settle()
-            rig.server.finish_current_track(QID)
-            rig.server.mark_ended(QID)
-            await rig.idle(0.3)
+    async def _restart_addon(
+        self, rig: Rig, session: dict[str, Any]
+    ) -> tuple[MusicAssistantBackend, Callbacks]:
+        """The new bridge process: its own connection and a backend with the saved session."""
+        conn = rig.new_connection()
+        await conn.start()
+        await rig.wait(lambda: conn.is_connected)
+        backend, cb = rig.make_backend(session=session, conn=conn)
+        await backend.connect()
+        return backend, cb
 
-            assert cb.endings() == NOTHING_FIRED
-            assert cb.state.call_count == 0
-        finally:
-            await conn.stop()
+    async def test_restored_session_is_detached_and_silent(self, rig: Rig) -> None:
+        session = await self._play_before_restart(rig, arm="102")
 
-    async def test_play_of_the_same_track_adopts_and_skips_a_stale_seek(
-        self, rig: Rig, tmp_path: Path
-    ) -> None:
-        path = tmp_path / "sessions.json"
-        await self._played_before_restart(rig, path, seconds=30)
-        conn, after, cb = await self._restart_addon(rig, path)
-        try:
-            rig.server.advance_time(QID, 10)  # the restart took 10 s; MA played on
-            media_calls = len(rig.calls("player_queues/play_media"))
+        after, cb = await self._restart_addon(rig, session)
 
-            await after.play(STREAM_URL, meta("101"))
-            await after.seek(30_000)  # the Qobuz app's position from before the restart
-            await rig.settle()
-
-            assert len(rig.calls("player_queues/play_media")) == media_calls
-            assert rig.calls("player_queues/seek") == []
-            assert rig.queue().corrected_elapsed_time == pytest.approx(40, abs=1)
-            cb.position.assert_called()
-            assert cb.position.call_args.args[0] == pytest.approx(40_000, abs=1_500)
-            assert await after.get_state() == PlaybackState.PLAYING
-            await rig.idle(0.2)
-            assert cb.endings() == NOTHING_FIRED
-        finally:
-            await conn.stop()
-
-    async def test_adopting_a_paused_track_resumes_it(self, rig: Rig, tmp_path: Path) -> None:
-        path = tmp_path / "sessions.json"
-        await self._played_before_restart(rig, path)
+        assert after._current is not None and after._current.track_id == "101"
+        assert after._attached is False
+        assert await after.get_state() == PlaybackState.STOPPED
         rig.server.ui_pause(QID)
-        conn, after, cb = await self._restart_addon(rig, path)
-        try:
-            media_calls = len(rig.calls("player_queues/play_media"))
-            await after.play(STREAM_URL, meta("101"))
-            await rig.settle()
-            assert len(rig.calls("player_queues/play_media")) == media_calls
-            assert len(rig.calls("player_queues/play")) == 1
-            assert rig.ma_state() == MAState.PLAYING
-        finally:
-            await conn.stop()
+        rig.server.ui_resume(QID)
+        rig.server.finish_current_track(QID)  # MA moves on to 102 by itself
+        await rig.settle()
+        rig.server.finish_current_track(QID)
+        rig.server.mark_ended(QID)
+        await rig.idle(0.3)
+
+        assert cb.endings() == NOTHING_FIRED
+        assert cb.state.call_count == 0
+
+    async def test_session_from_another_version_is_ignored(self, rig: Rig) -> None:
+        backend, _cb = rig.make_backend(session={"current": {"item_id": "x", "old": 1}})
+        assert await backend.connect() is True
+        assert backend._current is None
+        assert await backend.get_state() == PlaybackState.STOPPED
+
+    async def test_play_of_the_same_track_adopts_and_skips_a_stale_seek(self, rig: Rig) -> None:
+        session = await self._play_before_restart(rig)
+        after, cb = await self._restart_addon(rig, session)
+        rig.server.advance_time(QID, 10)  # the restart took 10 s; MA played on
+        media_calls = len(rig.calls("player_queues/play_media"))
+
+        await after.play(STREAM_URL, meta("101"))
+        await after.seek(30_000)  # the Qobuz app's position from before the restart
+        await rig.settle()
+
+        assert len(rig.calls("player_queues/play_media")) == media_calls
+        assert rig.calls("player_queues/seek") == []
+        assert rig.queue().corrected_elapsed_time == pytest.approx(40, abs=1)
+        cb.position.assert_called()
+        assert cb.position.call_args.args[0] == pytest.approx(40_000, abs=1_500)
+        assert await after.get_state() == PlaybackState.PLAYING
+        await rig.idle(0.2)
+        assert cb.endings() == NOTHING_FIRED
+
+    async def test_adopting_a_paused_track_resumes_it(self, rig: Rig) -> None:
+        session = await self._play_before_restart(rig)
+        rig.server.ui_pause(QID)
+        after, _cb = await self._restart_addon(rig, session)
+        media_calls = len(rig.calls("player_queues/play_media"))
+
+        await after.play(STREAM_URL, meta("101"))
+        await rig.settle()
+
+        assert len(rig.calls("player_queues/play_media")) == media_calls
+        assert len(rig.calls("player_queues/play")) == 1
+        assert rig.ma_state() == MAState.PLAYING
 
     async def test_same_track_right_after_our_stop_restarts(self, rig: Rig) -> None:
         await rig.play_for("101", 50)

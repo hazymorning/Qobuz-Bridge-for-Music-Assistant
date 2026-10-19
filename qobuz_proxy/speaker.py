@@ -8,7 +8,7 @@ run concurrently, one per physical audio device.
 
 import asyncio
 import logging
-from typing import Any, Optional
+from typing import Optional
 
 from aiohttp import web
 
@@ -21,7 +21,6 @@ from qobuz_proxy.config import (
     DLNAConfig,
     LocalConfig,
     LoggingConfig,
-    MusicAssistantConfig,
     QobuzConfig,
     ServerConfig,
     SpeakerConfig,
@@ -62,7 +61,7 @@ class Speaker:
         api_client: QobuzAPIClient,
         app_id: str,
         web_app: Optional[web.Application] = None,
-        ma_connection: Optional[Any] = None,
+        backend: Optional[AudioBackend] = None,
     ) -> None:
         """
         Initialize Speaker.
@@ -72,13 +71,13 @@ class Speaker:
             api_client: Authenticated Qobuz API client (shared across speakers)
             app_id: Qobuz application ID (shared across speakers)
             web_app: Optional shared aiohttp Application for discovery routes
-            ma_connection: Shared Music Assistant connection (music_assistant backend only)
+            backend: Ready-made backend to use instead of one built from the config
         """
         self._config = config
         self._api_client = api_client
         self._app_id = app_id
         self._web_app = web_app
-        self._ma_connection = ma_connection
+        self._given_backend = backend
         self._volume_tasks: set[asyncio.Task[None]] = set()
 
         self._is_running: bool = False
@@ -167,8 +166,6 @@ class Speaker:
         elif self._config.backend_type == "local":
             config_dict["audio_device"] = self._config.audio_device
             config_dict["buffer_size"] = self._config.audio_buffer_size
-        elif self._config.backend_type == "music_assistant":
-            config_dict["ma_player_id"] = self._config.ma_player_id
 
         return {
             "id": slugify_name(self._config.name),
@@ -210,7 +207,6 @@ class Speaker:
                     device=self._config.audio_device,
                     buffer_size=self._config.audio_buffer_size,
                 ),
-                music_assistant=MusicAssistantConfig(player_id=self._config.ma_player_id),
             ),
             server=ServerConfig(
                 http_port=self._config.http_port,
@@ -235,9 +231,11 @@ class Speaker:
 
             # 2. Create audio backend
             logger.debug(f"[{self.name}] Creating audio backend...")
-            backend = await BackendFactory.create_from_config(
-                component_config, ma_connection=self._ma_connection
-            )
+            if self._given_backend is not None:
+                backend = self._given_backend
+                await backend.connect()
+            else:
+                backend = await BackendFactory.create_from_config(component_config)
             self._backend = backend
             logger.info(f"[{self.name}] Connected to backend: {backend.name}")
 
@@ -275,15 +273,6 @@ class Speaker:
                             f"[{self.name}] Capability discovery unavailable, "
                             f"using fallback quality: CD (FLAC 16/44)"
                         )
-                elif self._config.backend_type == "music_assistant":
-                    # MA streams with its own Qobuz quality setting; the proxy's
-                    # URL lookup only checks that the track is available.
-                    self._effective_quality = 27
-                    self._quality_source = "auto"
-                    logger.info(
-                        f"[{self.name}] Music Assistant backend: Music Assistant streams with "
-                        f"its own Qobuz quality; using Hi-Res (24/192) for availability checks"
-                    )
                 else:
                     # Local backend: default to Hi-Res 192k
                     self._effective_quality = 27

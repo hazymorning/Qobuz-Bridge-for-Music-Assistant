@@ -133,20 +133,12 @@ class LocalConfig:
 
 
 @dataclass
-class MusicAssistantConfig:
-    """Music Assistant backend configuration (connection settings live in the data dir)."""
-
-    player_id: str = ""  # MA player or group id; its MA queue has the same id
-
-
-@dataclass
 class BackendConfig:
     """Audio backend configuration."""
 
     type: str = "dlna"
     dlna: DLNAConfig = field(default_factory=DLNAConfig)
     local: LocalConfig = field(default_factory=LocalConfig)
-    music_assistant: MusicAssistantConfig = field(default_factory=MusicAssistantConfig)
 
 
 @dataclass
@@ -182,7 +174,6 @@ class SpeakerConfig:
     proxy_port: int = 0  # 0 = auto-assign
     audio_device: str = "default"
     audio_buffer_size: int = 2048
-    ma_player_id: str = ""
 
 
 @dataclass
@@ -241,11 +232,6 @@ def validate_config(config: Config) -> None:
             errors.append(
                 f"Invalid buffer_size: {config.backend.local.buffer_size}. "
                 f"Must be between 64 and 16384"
-            )
-    elif config.backend.type == "music_assistant":
-        if not config.backend.music_assistant.player_id:
-            errors.append(
-                "Music Assistant player id is required when backend type is 'music_assistant'"
             )
     elif config.backend.type != "stub":
         errors.append(f"Unknown backend type: {config.backend.type}")
@@ -315,8 +301,6 @@ def speaker_config_to_dict(sc: SpeakerConfig) -> dict:
     elif sc.backend_type == "local":
         d["audio_device"] = sc.audio_device
         d["audio_buffer_size"] = sc.audio_buffer_size
-    elif sc.backend_type == "music_assistant":
-        d["ma_player_id"] = sc.ma_player_id
     return d
 
 
@@ -337,7 +321,6 @@ def _single_speaker_from_config(config: Config) -> SpeakerConfig:
         proxy_port=config.backend.dlna.proxy_port,
         audio_device=config.backend.local.device,
         audio_buffer_size=config.backend.local.buffer_size,
-        ma_player_id=config.backend.music_assistant.player_id,
     )
 
 
@@ -408,9 +391,7 @@ def _validate_speakers(speakers: list[SpeakerConfig]) -> None:
     for s in speakers:
         if s.backend_type == "dlna" and not s.dlna_ip:
             errors.append(f"Speaker '{s.name}': DLNA IP address is required")
-        if s.backend_type == "music_assistant" and not s.ma_player_id:
-            errors.append(f"Speaker '{s.name}': Music Assistant player id is required")
-        if s.backend_type not in ("dlna", "local", "music_assistant", "stub"):
+        if s.backend_type not in ("dlna", "local", "stub"):
             errors.append(f"Speaker '{s.name}': unknown backend type '{s.backend_type}'")
         if s.http_port and not validate_port(s.http_port):
             errors.append(f"Speaker '{s.name}': invalid HTTP port {s.http_port}")
@@ -446,7 +427,6 @@ def _parse_yaml_speakers(raw_speakers: list[dict], config: Config) -> list[Speak
             proxy_port=int(raw.get("proxy_port", 0)),
             audio_device=raw.get("audio_device", "default"),
             audio_buffer_size=int(raw.get("audio_buffer_size", 2048)),
-            ma_player_id=str(raw.get("ma_player_id", "")),
         )
         speakers.append(speaker)
     return speakers
@@ -536,14 +516,7 @@ def build_speaker_configs(
             speakers = env_speakers
         else:
             # Only create a speaker from flat config if a backend is actually configured
-            has_backend = (
-                config.backend.dlna.ip
-                or config.backend.type == "local"
-                or (
-                    config.backend.type == "music_assistant"
-                    and config.backend.music_assistant.player_id
-                )
-            )
+            has_backend = config.backend.dlna.ip or config.backend.type == "local"
             if has_backend:
                 speakers = [_single_speaker_from_config(config)]
 
@@ -713,11 +686,6 @@ def dict_to_config(d: dict) -> Config:
             config.backend.local.device = local.get("device", config.backend.local.device)
             config.backend.local.buffer_size = local.get(
                 "buffer_size", config.backend.local.buffer_size
-            )
-        if "music_assistant" in b:
-            ma = b["music_assistant"] or {}
-            config.backend.music_assistant.player_id = str(
-                ma.get("player_id", config.backend.music_assistant.player_id)
             )
 
     # Server

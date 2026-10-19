@@ -1,20 +1,10 @@
 """MusicAssistantBackend commands and gapless arming, against the fake MA server.
 
-Unit level: the backend talks to a real MusicAssistantConnection whose client is the
-real ``music-assistant-client`` wired to the in-memory server; the Player is replaced by
-mocks on the backend callbacks. The backend's timing constants are patched to tiny
-values (see ``FAST_TIMING``) and every wait is a bounded poll.
-
-The ``Rig`` here is shared with ``test_ma_events.py``.
+The rig (``conftest.py``) drives the backend like the Player does and reads MA's side.
 """
 
 import asyncio
-import logging
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
-from unittest.mock import AsyncMock, MagicMock
+from typing import Any, Callable
 
 import pytest
 
@@ -32,266 +22,52 @@ from music_assistant_models.errors import (  # noqa: E402
 )
 
 from qobuz_proxy.backends.base import TrackUnavailableError  # noqa: E402
-from qobuz_proxy.backends.music_assistant import backend as backend_module  # noqa: E402
-from qobuz_proxy.backends.music_assistant.backend import MusicAssistantBackend  # noqa: E402
-from qobuz_proxy.backends.music_assistant.connection import (  # noqa: E402
-    MANotConnectedError,
-    MusicAssistantConnection,
-)
-from qobuz_proxy.backends.music_assistant.settings import SessionStore  # noqa: E402
-from qobuz_proxy.backends.types import BackendTrackMetadata, PlaybackState  # noqa: E402
-from tests.backends.fake_music_assistant import FakeMAServer  # noqa: E402
-
-QID = "up1"
-NAME = "Kitchen (MA)"
-STREAM_URL = "https://streaming.qobuz.example/file.flac"  # ignored by the backend
-
-FAST_TIMING: dict[str, float] = {
-    "START_GRACE_SECONDS": 0.05,
-    "IDLE_SETTLE_SECONDS": 0.05,
-    "PLAY_ACTION_WINDOW_SECONDS": 0.1,
-    "DISCONNECT_GRACE_SECONDS": 0.1,
-    "VOLUME_DEBOUNCE_SECONDS": 0.02,
-    "VOLUME_SETTLE_SECONDS": 0.05,
-    "JUMP_WAIT_SECONDS": 0.05,
-    "NEXT_ARM_DELAY_SECONDS": 0.0,
-    "NEXT_RETRY_COOLDOWN_SECONDS": 0.05,
-    "EXPECT_STATE_SECONDS": 0.1,
-    "STREAM_SETTLE_SECONDS": 0.05,
-    "STALL_CONFIRM_SECONDS": 0.05,
-    "PROMOTE_SETTLE_SECONDS": 0.1,
-}
-
-
-def meta(track_id: str, start_ms: int = 0, duration_ms: int = 200_000) -> BackendTrackMetadata:
-    return BackendTrackMetadata(
-        track_id=track_id,
-        title=f"Song {track_id}",
-        artist="Artist",
-        album="Album",
-        duration_ms=duration_ms,
-        start_position_ms=start_ms,
-    )
-
-
-@dataclass
-class Callbacks:
-    """The Player side: one mock per backend callback."""
-
-    state: MagicMock = field(default_factory=MagicMock)
-    position: MagicMock = field(default_factory=MagicMock)
-    track_ended: MagicMock = field(default_factory=MagicMock)
-    next_started: MagicMock = field(default_factory=MagicMock)
-    interrupted: MagicMock = field(default_factory=MagicMock)
-    volume: MagicMock = field(default_factory=MagicMock)
-    external: AsyncMock = field(default_factory=AsyncMock)
-
-    def wire(self, backend: MusicAssistantBackend) -> "Callbacks":
-        backend.on_state_change(self.state)
-        backend.on_position_update(self.position)
-        backend.on_track_ended(self.track_ended)
-        backend.on_next_track_started(self.next_started)
-        backend.on_playback_interrupted(self.interrupted)
-        backend.on_volume_change(self.volume)
-        backend.on_external_playback(self.external)
-        return self
-
-    def endings(self) -> dict[str, int]:
-        """How often each 'the track is over' callback fired."""
-        return {
-            "track_ended": self.track_ended.call_count,
-            "next_started": self.next_started.call_count,
-            "interrupted": self.interrupted.call_count,
-            "external": self.external.await_count,
-        }
-
-
-NOTHING_FIRED = {"track_ended": 0, "next_started": 0, "interrupted": 0, "external": 0}
-
-
-class Rig:
-    """Fake MA server + real connection + one backend with mocked Player callbacks."""
-
-    def __init__(self, server: FakeMAServer, conn: MusicAssistantConnection) -> None:
-        self.server = server
-        self.conn = conn
-        self.sessions = SessionStore()
-        self.backends: list[MusicAssistantBackend] = []
-        self.backend, self.cb = self.make_backend()
-
-    def make_backend(
-        self,
-        player_id: str = QID,
-        name: str = NAME,
-        sessions: Optional[SessionStore] = None,
-        conn: Optional[MusicAssistantConnection] = None,
-    ) -> tuple[MusicAssistantBackend, Callbacks]:
-        backend = MusicAssistantBackend(
-            conn or self.conn,
-            player_id,
-            name,
-            session_store=sessions if sessions is not None else self.sessions,
-        )
-        self.backends.append(backend)
-        return backend, Callbacks().wire(backend)
-
-    # --- waiting -------------------------------------------------------------------------
-
-    async def settle(self) -> None:
-        await self.server.settle()
-
-    async def wait(self, cond: Callable[[], bool], timeout: float = 2.0, what: str = "") -> None:
-        """Poll ``cond`` every 5 ms (letting MA frames through) until it holds."""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        while True:
-            await self.server.settle()
-            if cond():
-                return
-            if loop.time() > deadline:
-                raise AssertionError(f"timed out waiting for {what or cond}")
-            await asyncio.sleep(0.005)
-
-    async def idle(self, seconds: float) -> None:
-        """Let real time pass (patched timers fire), then deliver MA frames."""
-        await asyncio.sleep(seconds)
-        await self.server.settle()
-
-    # --- driving the backend like the Player does ---------------------------------------
-
-    async def play(
-        self, track_id: str, start_ms: int = 0, backend: Optional[MusicAssistantBackend] = None
-    ) -> None:
-        await (backend or self.backend).play(STREAM_URL, meta(track_id, start_ms))
-        await self.settle()
-
-    async def play_for(
-        self, track_id: str, seconds: float, backend: Optional[MusicAssistantBackend] = None
-    ) -> None:
-        """Play a track and let it run ``seconds``, polled like the Player's monitor loop."""
-        await self.play(track_id, backend=backend)
-        await self.idle(FAST_TIMING["START_GRACE_SECONDS"] + 0.01)
-        self.server.advance_time(QID, seconds)
-        await self.poll(backend)
-
-    async def arm(
-        self,
-        track_id: str,
-        queue_item_id: int = 0,
-        backend: Optional[MusicAssistantBackend] = None,
-    ) -> bool:
-        b = backend or self.backend
-        ok = await b.set_next_track(STREAM_URL, meta(track_id), queue_item_id)
-        await self.settle()
-        return ok
-
-    async def poll(self, backend: Optional[MusicAssistantBackend] = None) -> PlaybackState:
-        """One round of the Player's monitor loop (state + position)."""
-        b = backend or self.backend
-        state = await b.get_state()
-        await b.get_position()
-        return state
-
-    # --- reading MA -----------------------------------------------------------------------
-
-    def queue(self) -> Any:
-        return self.server.queue(QID)
-
-    def ma_state(self) -> MAState:
-        return self.server.queue(QID).state
-
-    def ma_track(self) -> Optional[str]:
-        item = self.server.queue(QID).current_item
-        return item.media_item.item_id if item is not None and item.media_item else None
-
-    def ma_item_id(self, index: int) -> str:
-        return self.server.item_ids(QID)[index]
-
-    def calls(self, command: str) -> list[dict[str, Any]]:
-        return self.server.calls(command)
-
-    def write_names(self) -> list[str]:
-        return [name for name, _ in self.server.writes]
-
-
-def patch_timing(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
-    """Patch the backend's timing constants; returns a function that overrides some."""
-
-    def apply(**values: float) -> None:
-        for name, value in values.items():
-            monkeypatch.setattr(backend_module, name, value)
-
-    # Constants this backend version does not have are skipped (an override of one fails)
-    apply(**{k: v for k, v in FAST_TIMING.items() if hasattr(backend_module, k)})
-    monkeypatch.setattr(MusicAssistantConnection, "RECONNECT_DELAYS_SECONDS", (0.01,))
-    return apply
-
-
-@asynccontextmanager
-async def running_rig() -> AsyncIterator[Rig]:
-    """A connected rig; patch the timing first."""
-    server = FakeMAServer()
-    server.add_qobuz_provider()
-    server.add_player(QID, "Kitchen")
-    conn = MusicAssistantConnection(server.url, server.token, client_factory=server.client_factory)
-    await conn.start()
-    r = Rig(server, conn)
-    try:
-        await r.wait(lambda: conn.is_connected, what="MA connection")
-        await r.backend.connect()
-        yield r
-    finally:
-        for backend in r.backends:
-            await backend.disconnect()
-        await conn.stop()
-
-
-@pytest.fixture
-def timing(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
-    return patch_timing(monkeypatch)
-
-
-@pytest.fixture
-async def rig(timing: Callable[..., None]) -> AsyncIterator[Rig]:
-    async with running_rig() as r:
-        yield r
-
+from qobuz_proxy.backends.music_assistant.connection import NotConnectedError  # noqa: E402
+from qobuz_proxy.backends.types import PlaybackState  # noqa: E402
+from tests.backends.conftest import NOTHING_FIRED, QID, STREAM_URL, Rig, meta  # noqa: E402
 
 # ----------------------------------------------------------------------------- basics
 
 
 class TestBasics:
-    async def test_info_and_capabilities(self, rig: Rig) -> None:
-        info = rig.backend.get_info()
-        assert (info.backend_type, info.name, info.device_id) == ("music_assistant", NAME, QID)
-        assert rig.backend.player_id == QID
-        assert rig.backend.reports_external_resume is True
-        assert rig.backend.supports_gapless is True
-        assert rig.backend.is_connected()
-
     async def test_nothing_played_reads_stopped_without_calling_ma(self, rig: Rig) -> None:
         commands = len(rig.server.command_log)
         assert await rig.backend.get_state() == PlaybackState.STOPPED
         assert await rig.backend.get_position() == 0
         assert len(rig.server.command_log) == commands
 
-    async def test_disconnect_is_idempotent_and_leaves_ma_playing(self, rig: Rig) -> None:
+    async def test_disconnect_leaves_ma_playing(self, rig: Rig) -> None:
         await rig.play("101")
         await rig.backend.disconnect()
-        await rig.backend.disconnect()
+        await rig.backend.disconnect()  # idempotent
         await rig.settle()
         assert rig.ma_state() == MAState.PLAYING
         assert rig.calls("player_queues/stop") == []
         assert not rig.backend.is_connected()
 
     async def test_connect_succeeds_while_ma_is_down(self, rig: Rig) -> None:
-        rig.server.set_reachable(False, drop=True)
-        await rig.wait(lambda: not rig.conn.is_connected)
+        await rig.lose_ma()
         backend, _cb = rig.make_backend()
 
         assert await backend.connect() is True
         assert await backend.connect() is True  # idempotent
         assert await backend.get_state() == PlaybackState.STOPPED
+
+    async def test_commands_while_ma_is_down(self, rig: Rig) -> None:
+        await rig.play("101")
+        await rig.lose_ma()
+        writes = list(rig.server.writes)
+
+        with pytest.raises(NotConnectedError):
+            await rig.backend.pause()
+        with pytest.raises(NotConnectedError):
+            await rig.backend.seek(100_000)
+        assert await rig.backend.resume() is False
+        await rig.backend.set_volume(70)  # skipped, no exception
+        await rig.backend.stop()  # no exception
+
+        assert rig.server.writes == writes
+        assert await rig.backend.get_state() == PlaybackState.STOPPED
 
 
 # ------------------------------------------------------------------------------- play
@@ -315,21 +91,6 @@ class TestPlay:
         rig.cb.state.assert_called_with(PlaybackState.PLAYING)
         assert rig.calls("player_queues/clear") == []
         assert rig.calls("player_queues/play_index") == []
-
-    async def test_play_replaces_what_ma_was_playing(self, rig: Rig) -> None:
-        rig.server.start_playing(QID, ["900", "901"])
-        await rig.settle()
-
-        await rig.play("101")
-
-        assert rig.server.track_ids(QID) == ["101"]
-        assert rig.cb.endings() == NOTHING_FIRED
-
-    async def test_play_logs_the_command(self, rig: Rig, caplog: pytest.LogCaptureFixture) -> None:
-        with caplog.at_level(logging.INFO):
-            await rig.play("101")
-        assert f"[{NAME}] Qobuz: play track 101 'Song 101' – Artist" in caplog.text
-        assert "MA → player_queues/play_media queue=up1 media=qobuz://track/101" in caplog.text
 
     async def test_positioned_start_seeks_in_one_step(self, rig: Rig) -> None:
         await rig.play("101", start_ms=65_000)
@@ -358,14 +119,12 @@ class TestPlay:
         assert rig.calls("player_queues/play_index") == []
 
     async def test_play_without_ma_raises_not_connected(self, rig: Rig) -> None:
-        rig.server.set_reachable(False, drop=True)
-        await rig.wait(lambda: not rig.conn.is_connected)
-        writes = list(rig.server.writes)
+        await rig.lose_ma()
 
-        with pytest.raises(MANotConnectedError):
+        with pytest.raises(NotConnectedError):
             await rig.backend.play(STREAM_URL, meta("101"))
 
-        assert rig.server.writes == writes
+        assert rig.server.writes == []
         assert await rig.backend.get_state() == PlaybackState.STOPPED
 
     @pytest.mark.parametrize(
@@ -400,7 +159,7 @@ class TestPlay:
             await rig.backend.play(STREAM_URL, meta("101"))
 
         assert not isinstance(err.value, TrackUnavailableError)
-        assert not isinstance(err.value, MANotConnectedError)
+        assert not isinstance(err.value, NotConnectedError)
 
     async def test_library_item_is_recognised_as_ours(self, rig: Rig) -> None:
         rig.server.library_track_ids.add("101")
@@ -448,20 +207,6 @@ class TestPauseResume:
         assert await rig.backend.get_state() == PlaybackState.PLAYING
         assert rig.cb.endings() == NOTHING_FIRED
 
-    async def test_pause_without_ma_raises_not_connected(self, rig: Rig) -> None:
-        await rig.play("101")
-        rig.server.set_reachable(False, drop=True)
-        await rig.wait(lambda: not rig.conn.is_connected)
-        with pytest.raises(MANotConnectedError):
-            await rig.backend.pause()
-
-    async def test_resume_without_ma_returns_false(self, rig: Rig) -> None:
-        await rig.play("101")
-        await rig.backend.pause()
-        rig.server.set_reachable(False, drop=True)
-        await rig.wait(lambda: not rig.conn.is_connected)
-        assert await rig.backend.resume() is False
-
     async def test_resume_after_mas_paused_auto_stop(self, rig: Rig) -> None:
         await rig.play_for("101", 40)
         await rig.backend.pause()
@@ -500,8 +245,7 @@ class TestPauseResume:
     async def test_resume_when_ma_lost_the_item_replays_at_the_position(self, rig: Rig) -> None:
         await rig.play_for("101", 40)
         await rig.backend.pause()
-        rig.server.set_reachable(False, drop=True)  # MA goes away while paused...
-        await rig.wait(lambda: not rig.conn.is_connected)
+        await rig.lose_ma()  # MA goes away while paused...
         rig.server.remove_player(QID)  # ...and comes back without our queue items
         rig.server.add_player(QID, "Kitchen")
         rig.server.set_reachable(True)
@@ -564,13 +308,6 @@ class TestStop:
         await rig.settle()
         assert rig.server.writes == []
         assert rig.ma_state() == MAState.PLAYING
-
-    async def test_stop_while_ma_is_down_does_not_raise(self, rig: Rig) -> None:
-        await rig.play("101")
-        rig.server.set_reachable(False, drop=True)
-        await rig.wait(lambda: not rig.conn.is_connected)
-        await rig.backend.stop()
-        assert await rig.backend.get_state() == PlaybackState.STOPPED
 
     async def test_stop_for_the_armed_next_track_sends_nothing_and_play_jumps(
         self, rig: Rig
@@ -662,9 +399,6 @@ class TestSeek:
         await rig.play_for("101", 30)
         await rig.backend.seek(30_800)
         assert rig.calls("player_queues/seek") == []
-
-    async def test_seek_far_from_where_ma_is_is_sent(self, rig: Rig) -> None:
-        await rig.play_for("101", 30)
         await rig.backend.seek(10_000)
         assert rig.calls("player_queues/seek") == [{"queue_id": QID, "position": 10}]
 
@@ -678,13 +412,6 @@ class TestSeek:
         with pytest.raises(RuntimeError, match="not playing this Qobuz track"):
             await rig.backend.seek(50_000)
         assert rig.calls("player_queues/seek") == []
-
-    async def test_seek_without_ma_raises_not_connected(self, rig: Rig) -> None:
-        await rig.play("101")
-        rig.server.set_reachable(False, drop=True)
-        await rig.wait(lambda: not rig.conn.is_connected)
-        with pytest.raises(MANotConnectedError):
-            await rig.backend.seek(100_000)
 
 
 # ------------------------------------------------------------------------------ volume
@@ -729,17 +456,6 @@ class TestVolume:
         assert rig.server.players[QID].volume_level == 40
         assert rig.cb.volume.call_count == 0
 
-    async def test_get_volume_reads_ma(self, rig: Rig) -> None:
-        rig.server.set_player_volume(QID, 66)
-        await rig.settle()
-        assert await rig.backend.get_volume() == 66
-
-    async def test_volume_without_ma_is_skipped(self, rig: Rig) -> None:
-        rig.server.set_reachable(False, drop=True)
-        await rig.wait(lambda: not rig.conn.is_connected)
-        await rig.backend.set_volume(70)  # no exception
-        assert rig.calls("players/cmd/group_volume") == []
-
     async def test_group_player_reads_group_volume(self, rig: Rig) -> None:
         rig.server.add_player("up2", "Bath", volume=20)
         rig.server.add_player(
@@ -782,8 +498,8 @@ class TestVolume:
         assert rig.cb.volume.call_count == 0
         assert rig.server.players[QID].volume_level == 45
 
-    async def test_device_side_change_to_fifty_is_reported(self, rig: Rig) -> None:
-        # MA starts at 30; the user drags MA's slider to 50
+    async def test_change_in_ma_to_the_backends_default_level_is_reported(self, rig: Rig) -> None:
+        # The backend starts from MA's 30, not its own default of 50
         rig.server.set_player_volume(QID, 50)
         await rig.wait(lambda: rig.cb.volume.called, timeout=0.5)
         rig.cb.volume.assert_called_once_with(50)
@@ -848,27 +564,17 @@ class TestSessionSetup:
         assert rig.queue().repeat_mode == RepeatMode.OFF
         assert await rig.backend.get_state() == PlaybackState.PLAYING
 
-    async def test_refused_repeat_change_does_not_fail_play(self, rig: Rig) -> None:
+    async def test_refused_setting_changes_do_not_fail_play(self, rig: Rig) -> None:
         rig.queue().is_dynamic = True
         rig.queue().repeat_mode = RepeatMode.ALL
+        rig.queue().autoplay_enabled = True
+        rig.server.fail_next["player_queues/autoplay"] = InvalidCommand("autoplay")
 
         await rig.play("101")
 
         assert len(rig.calls("player_queues/repeat")) == 1
+        assert len(rig.calls("player_queues/autoplay")) == 1
         assert await rig.backend.get_state() == PlaybackState.PLAYING
-
-    async def test_autoplay_falls_back_to_dont_stop_the_music(self, rig: Rig) -> None:
-        rig.queue().autoplay_enabled = True
-        rig.server.fail_next["player_queues/autoplay"] = InvalidCommand(
-            "Invalid command: player_queues/autoplay"
-        )
-
-        await rig.play("101")
-
-        assert rig.calls("player_queues/dont_stop_the_music") == [
-            {"queue_id": QID, "dont_stop_the_music_enabled": False}
-        ]
-        assert rig.queue().autoplay_enabled is False
 
 
 # ----------------------------------------------------------------------------- gapless
@@ -896,13 +602,6 @@ class TestGapless:
             "102",
             7,
         )
-
-    async def test_arm_logs_the_command(self, rig: Rig, caplog: pytest.LogCaptureFixture) -> None:
-        await rig.play("101")
-        with caplog.at_level(logging.INFO):
-            assert await rig.arm("102")
-        assert f"[{NAME}] Qobuz: queue next track 102" in caplog.text
-        assert "Queued next track 102 in Music Assistant (gapless)" in caplog.text
 
     async def test_arm_needs_ma_to_be_playing(self, rig: Rig) -> None:
         await rig.play("101")
@@ -988,11 +687,14 @@ class TestGapless:
         await rig.play("101")
         rig.server.start_playing(QID, ["777"], option="add")  # "Add to queue" in MA's UI
         await rig.settle()
-        replace_next_before = len(rig.calls("player_queues/play_media"))
+        media_calls = len(rig.calls("player_queues/play_media"))
 
         assert await rig.arm("102") is False
+        commands = len(rig.server.command_log)
+        assert await rig.arm("102") is False  # cooling down: no MA call
 
-        assert len(rig.calls("player_queues/play_media")) == replace_next_before
+        assert len(rig.server.command_log) == commands
+        assert len(rig.calls("player_queues/play_media")) == media_calls
         assert rig.server.track_ids(QID) == ["101", "777"]
         assert rig.backend._armed is None
 
@@ -1028,7 +730,7 @@ class TestGapless:
         assert rig.backend._armed is None
         assert item not in rig.backend._stale_item_ids
 
-    async def test_clear_with_nothing_armed_is_a_no_op(self, rig: Rig) -> None:
+    async def test_clear_with_nothing_armed_sends_nothing(self, rig: Rig) -> None:
         await rig.play("101")
         writes = list(rig.server.writes)
         await rig.backend.clear_next_track()

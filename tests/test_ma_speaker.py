@@ -14,7 +14,7 @@ from qobuz_proxy.speaker import Speaker
 
 
 def _speaker(backend_type: str, active: bool) -> tuple[Speaker, AsyncMock]:
-    config = SpeakerConfig(name="Kitchen", backend_type=backend_type, ma_player_id="up1")
+    config = SpeakerConfig(name="Kitchen", backend_type=backend_type)
     speaker = Speaker(config=config, api_client=MagicMock(), app_id="app")
     handler = MagicMock()
     handler.handle_message = AsyncMock()

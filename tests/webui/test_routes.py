@@ -165,7 +165,7 @@ async def test_index_uses_root_base_without_ingress(client: TestClient) -> None:
     assert '<base href="/">' in body
     # Assets are referenced relative to that base.
     assert 'href="static/style.css' in body
-    assert 'src="static/app.js' in body
+    assert 'src="static/panel.js' in body
 
 
 async def test_index_injects_ingress_base(client: TestClient) -> None:

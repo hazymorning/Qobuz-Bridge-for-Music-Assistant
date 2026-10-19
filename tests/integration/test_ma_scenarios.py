@@ -33,12 +33,14 @@ from music_assistant_models.enums import PlayerType  # noqa: E402
 
 from qobuz_proxy import speaker as speaker_module  # noqa: E402
 from qobuz_proxy.backends.music_assistant import backend as backend_module  # noqa: E402
-from qobuz_proxy.backends.music_assistant import settings as settings_module  # noqa: E402
+from qobuz_proxy.backends.music_assistant import connection as connection_module  # noqa: E402
+from qobuz_proxy.backends.music_assistant import settings  # noqa: E402
+from qobuz_proxy.backends.music_assistant.backend import MusicAssistantBackend  # noqa: E402
 from qobuz_proxy.backends.music_assistant.connection import (  # noqa: E402
-    MAConnectionState,
+    ConnectionState,
     MusicAssistantConnection,
 )
-from qobuz_proxy.backends.music_assistant.manager import ma_device_uuid  # noqa: E402
+from qobuz_proxy.backends.music_assistant.manager import device_uuid  # noqa: E402
 from qobuz_proxy.backends.types import PlaybackState  # noqa: E402
 from qobuz_proxy.config import SpeakerConfig  # noqa: E402
 from qobuz_proxy.connect.protocol import DecodedMessage, MessageType, ProtocolCodec  # noqa: E402
@@ -74,20 +76,14 @@ def fast_timers(monkeypatch: pytest.MonkeyPatch) -> None:
         "JUMP_WAIT_SECONDS": 0.2,
         "NEXT_ARM_DELAY_SECONDS": 0.0,
         "NEXT_RETRY_COOLDOWN_SECONDS": 0.05,
-    }.items():
-        monkeypatch.setattr(backend_module, name, value)
-    # Newer wall-clock windows. The fake moves MA's position only with advance_time (no
-    # real seconds pass) and does not emulate the quirks these windows absorb (stream
-    # overshoot after a restart, stale current item after "next"), so keep them tiny.
-    for name, value in {
+        # The fake moves MA's position only with advance_time and does not emulate the
+        # quirks these windows absorb (stale current item after "next"), so keep them tiny.
         "EXPECT_STATE_SECONDS": 0.5,
-        "STREAM_SETTLE_SECONDS": 0.0,
         "PROMOTE_SETTLE_SECONDS": 0.1,
         "STALL_CONFIRM_SECONDS": 0.1,
     }.items():
-        if hasattr(backend_module, name):
-            monkeypatch.setattr(backend_module, name, value)
-    monkeypatch.setattr(MusicAssistantConnection, "RECONNECT_DELAYS_SECONDS", (0.02,))
+        monkeypatch.setattr(backend_module, name, value)
+    monkeypatch.setattr(connection_module, "RECONNECT_DELAYS_SECONDS", (0.02,))
 
 
 # =============================================================================
@@ -100,21 +96,8 @@ class StubMetadata:
 
     def __init__(self) -> None:
         self.unavailable: set[str] = set()
-        self.url_requests: list[str] = []
-        self._max_quality = 27
-
-    @property
-    def max_quality(self) -> int:
-        return self._max_quality
-
-    def set_max_quality(self, quality: int) -> None:
-        self._max_quality = quality
-
-    def is_unavailable(self, track_id: str) -> bool:
-        return track_id in self.unavailable
 
     async def get_streaming_url(self, track_id: str) -> Optional[str]:
-        self.url_requests.append(track_id)
         if track_id in self.unavailable:
             return None  # "Not available" in this region
         return f"https://streaming.qobuz.test/{track_id}.flac"
@@ -148,7 +131,6 @@ class StubDiscovery:
     """mDNS + discovery HTTP endpoints (not needed: the app 'connects' via _setup_websocket)."""
 
     def __init__(self, config: Any, app_id: str, **kwargs: Any) -> None:
-        self.sessions: list[ConnectTokens] = []
         self.cleared = 0
 
     async def start(self) -> None:
@@ -158,7 +140,7 @@ class StubDiscovery:
         pass
 
     def set_session(self, tokens: ConnectTokens) -> None:
-        self.sessions.append(tokens)
+        pass
 
     def clear_session(self) -> None:
         self.cleared += 1
@@ -200,12 +182,10 @@ class QobuzCloud:
     def __init__(self) -> None:
         self.codec = ProtocolCodec(b"\x00" * 16)
         self.sockets: list[CloudSocket] = []
-        self.joins: list[Any] = []
         self.reports: list[Any] = []
         self.actions: list[int] = []
         self.volumes: list[int] = []
         self.album: list[str] = list(ALBUM)
-        self.answer_reports = True
         self.current_qid = 0
         self._answered_qid = 0
         self.deliver: Optional[Callable[..., Any]] = None  # set by the rig
@@ -222,9 +202,7 @@ class QobuzCloud:
         batch = self.codec.decode_qconnect_batch(decoded.payload)
         assert batch is not None
         for msg in batch.messages:
-            if msg.messageType == 21:
-                self.joins.append(msg.rndrSrvrJoinSession)
-            elif msg.messageType == 23:
+            if msg.messageType == 23:
                 state = common_pb.QueueRendererState()
                 state.CopyFrom(msg.rndrSrvrStateUpdated.state)
                 self.reports.append(state)
@@ -241,7 +219,7 @@ class QobuzCloud:
         if not qid:
             return
         self.current_qid = qid
-        if not self.answer_reports or qid == self._answered_qid or self.deliver is None:
+        if qid == self._answered_qid or self.deliver is None:
             return
         self._answered_qid = qid
         if qid < len(self.album):
@@ -322,10 +300,12 @@ class Rig:
         *,
         player_id: str = PID,
         name: str = "Kitchen (MA)",
+        sessions: Optional[dict[str, dict[str, Any]]] = None,
     ) -> None:
         self.server = server
         self.player_id = player_id
         self.name = name
+        self.sessions: dict[str, dict[str, Any]] = {} if sessions is None else sessions
         self.cloud = QobuzCloud()
         self.cloud.deliver = self._deliver_later
         self.metadata = StubMetadata()
@@ -351,17 +331,30 @@ class Rig:
         await self.conn.start()
         if wait_for_ma:
             await self.wait_for(lambda: self.conn is not None and self.conn.is_connected, "MA")
+        backend = MusicAssistantBackend(
+            self.conn,
+            self.player_id,
+            self.name,
+            session=self.sessions.get(self.player_id),
+            save_session=self._save_session,
+        )
         config = SpeakerConfig(
             name=self.name,
-            uuid=ma_device_uuid(self.player_id),
+            uuid=device_uuid(self.player_id),
             backend_type="music_assistant",
             max_quality=27,
             http_port=8700,
-            ma_player_id=self.player_id,
         )
-        self.speaker = Speaker(config, MagicMock(), "test-app", ma_connection=self.conn)
+        self.speaker = Speaker(config, MagicMock(), "test-app", backend=backend)
         assert await self.speaker.start()
         return self
+
+    def _save_session(self, session: Optional[dict[str, Any]]) -> None:
+        """Keep the backend's session like the manager does (per MA player id)."""
+        if session is None:
+            self.sessions.pop(self.player_id, None)
+        else:
+            self.sessions[self.player_id] = session
 
     async def close(self) -> None:
         if self.speaker is not None:
@@ -379,13 +372,6 @@ class Rig:
         await self.wait_for(lambda: self.ws.is_connected, "Qobuz websocket")
         self._track_handlers()
         await self.deliver(set_active(True))
-
-    @property
-    def backend(self) -> backend_module.MusicAssistantBackend:
-        assert self.speaker is not None
-        backend = self.speaker._backend
-        assert isinstance(backend, backend_module.MusicAssistantBackend)
-        return backend
 
     @property
     def player(self) -> Any:
@@ -1066,7 +1052,7 @@ class TestTokenRevoked:
 
         rig.server.revoke_token(rig.server.token)
         await rig.wait_for(
-            lambda: rig.conn.status.state == MAConnectionState.AUTH_FAILED, "auth failed"
+            lambda: rig.conn.status.state == ConnectionState.AUTH_FAILED, "auth failed"
         )
         assert rig.player.state == PlaybackState.PLAYING  # a short outage is not a stop yet
         await rig.wait_for(lambda: rig.app()[0] == APP_STOPPED, "app shows stopped")
@@ -1074,8 +1060,7 @@ class TestTokenRevoked:
 
         await rig.idle(0.5)  # 25 reconnect delays
         assert len(rig.server.created_clients) - before == 1  # one attempt, then it gave up
-        assert rig.conn.status.state == MAConnectionState.AUTH_FAILED
-        assert "Connect again" in rig.conn.status.message
+        assert rig.conn.status.state == ConnectionState.AUTH_FAILED
 
 
 # =============================================================================
@@ -1084,7 +1069,7 @@ class TestTokenRevoked:
 
 
 class TestAddonRestart:
-    async def _restart_mid_play(self, server, monkeypatch) -> tuple[Rig, list[str]]:
+    async def _restart_mid_play(self, server, monkeypatch, tmp_path) -> tuple[Rig, list[str]]:
         """Play, stop the add-on (MA keeps playing), start a new process, re-select."""
         first = await Rig(server, monkeypatch).start()
         await first.select()
@@ -1096,11 +1081,12 @@ class TestAddonRestart:
         assert "player_queues/stop" not in first.writes()
         assert server.queue(PID).state == MAState.PLAYING
         items_before = server.item_ids(PID)
-        # A new process reads the remembered session from disk
-        monkeypatch.setattr(settings_module.SessionStore, "_shared", {})
+        # A new process reads the remembered session from the settings file
+        path = tmp_path / "music_assistant.json"
+        settings.save(path, settings.Settings(sessions=first.sessions))
         server.clear_logs()
 
-        second = await Rig(server, monkeypatch).start()
+        second = await Rig(server, monkeypatch, sessions=settings.load(path).sessions).start()
         await second.select()
         # After the reconnect the Qobuz server replays its snapshot from before (paused at an
         # old position), then the app plays
@@ -1110,9 +1096,9 @@ class TestAddonRestart:
         return second, items_before
 
     async def test_restart_mid_play_takes_over_what_ma_plays_without_restarting_it(
-        self, fast_heartbeat, server, monkeypatch
+        self, fast_heartbeat, server, monkeypatch, tmp_path
     ):
-        second, _ = await self._restart_mid_play(server, monkeypatch)
+        second, _ = await self._restart_mid_play(server, monkeypatch, tmp_path)
         try:
             await second.wait_for(
                 lambda: second.app()[0] == APP_PLAYING and second.app_position() >= 59_000,
@@ -1140,9 +1126,9 @@ class TestAddonRestart:
             await second.close()
 
     async def test_restart_keeps_the_next_track_ma_already_has_queued(
-        self, fast_heartbeat, server, monkeypatch
+        self, fast_heartbeat, server, monkeypatch, tmp_path
     ):
-        second, items_before = await self._restart_mid_play(server, monkeypatch)
+        second, items_before = await self._restart_mid_play(server, monkeypatch, tmp_path)
         try:
             await second.wait_for(lambda: second.player._gapless_armed, "next track armed")
             await second.idle(0.6)
@@ -1200,8 +1186,8 @@ class TestMAUnreachableAtBoot:
         rig = await Rig(server, monkeypatch).start(wait_for_ma=False)
         try:
             assert rig.conn.status.state in (
-                MAConnectionState.CONNECTING,
-                MAConnectionState.DISCONNECTED,
+                ConnectionState.CONNECTING,
+                ConnectionState.DISCONNECTED,
             )
             await rig.select()  # the device is visible and selectable anyway
             await rig.deliver(album_state(0))

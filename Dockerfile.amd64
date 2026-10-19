@@ -54,6 +54,6 @@ ENV QOBUZPROXY_COMMIT="${BUILD_VERSION}"
 # Runs as root on purpose: /data is a root-owned bind mount created by the
 # Supervisor, and it writes options.json there on every start.
 # No HEALTHCHECK: the "watchdog" URL in config.json checks liveness instead.
-# tini (config.json "init", default true) is PID 1, and run.sh execs the app,
+# tini (config.json "init", default true) is PID 1, and start.py execs the app,
 # so SIGTERM reaches Python.
-CMD ["/bin/sh", "/run.sh"]
+CMD ["python3", "/start.py"]
