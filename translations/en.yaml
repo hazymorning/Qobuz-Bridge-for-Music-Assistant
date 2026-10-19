@@ -1,0 +1,6 @@
+configuration:
+  log_level:
+    name: Log level
+    description: >-
+      How much detail goes into the add-on log. Use "debug" only while
+      troubleshooting; "info" shows every Qobuz command and Music Assistant call.

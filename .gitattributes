@@ -1,0 +1,5 @@
+# The add-on image runs these with /bin/sh and python3 on Linux: a CRLF
+# checkout (e.g. a commit from Windows) would break them.
+*.sh text eol=lf
+rootfs/** text eol=lf
+Dockerfile* text eol=lf

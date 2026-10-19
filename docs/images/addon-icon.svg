@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- Add-on icon (rendered to /icon.png): a speaker sending out a signal. Original artwork. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f46e5"/>
+      <stop offset="1" stop-color="#7c3aed"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#tile)"/>
+  <rect x="48" y="52" width="84" height="152" rx="20" fill="#ffffff"/>
+  <circle cx="90" cy="88" r="13" fill="#5b3fe0"/>
+  <circle cx="90" cy="152" r="32" fill="#5b3fe0"/>
+  <circle cx="90" cy="152" r="12" fill="#ffffff"/>
+  <g fill="none" stroke="#5eead4" stroke-width="12" stroke-linecap="round">
+    <path d="M160.2 97.2 A46 46 0 0 1 160.2 158.8"/>
+    <path d="M182.5 77.1 A76 76 0 0 1 182.5 178.9"/>
+  </g>
+</svg>

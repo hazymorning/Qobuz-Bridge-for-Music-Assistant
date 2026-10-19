@@ -1,0 +1,30 @@
+# QobuzProxy Docker Compose Configuration
+#
+# IMPORTANT: network_mode: host is REQUIRED for mDNS to work.
+# This allows the Qobuz app to discover the device on your local network.
+# Without host networking, mDNS multicast packets won't reach the container.
+#
+# Alternative: Use macvlan network with a dedicated IP address on your LAN.
+#
+# Place your config.yaml in the data directory mounted at /data.
+# See config.yaml.example for multi-speaker configuration.
+
+version: "3.8"
+
+services:
+  qobuz-proxy:
+    image: ghcr.io/leolobato/qobuz-proxy:latest
+    # build: .  # Uncomment to build from local Dockerfile instead
+
+    container_name: qobuz-proxy
+
+    # REQUIRED: Host networking for mDNS multicast
+    # This exposes the container directly on the host's network
+    network_mode: host
+
+    # /data contains config.yaml and credential cache
+    volumes:
+      - ./data:/data
+
+    # Restart policy
+    restart: unless-stopped

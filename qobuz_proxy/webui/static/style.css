@@ -1,0 +1,1289 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    background: #0f0f0f;
+    color: #e0e0e0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+    padding: 24px 16px;
+}
+
+.container {
+    max-width: 640px;
+    margin: 0 auto;
+}
+
+h1 {
+    font-size: 24px;
+    font-weight: 600;
+    margin-bottom: 20px;
+    color: #ffffff;
+}
+
+h2 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: #ffffff;
+}
+
+/* Cards */
+
+.card {
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+}
+
+.card-error {
+    border-color: #d32f2f;
+}
+
+.card-info {
+    border-color: #1976d2;
+}
+
+.card-success {
+    border-color: #388e3c;
+}
+
+/* Card header with status dot */
+
+.card-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: #ffffff;
+}
+
+/* Status dots */
+
+.status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+}
+
+.status-error {
+    background: #d32f2f;
+}
+
+.status-info {
+    background: #1976d2;
+}
+
+.status-success {
+    background: #388e3c;
+}
+
+/* Buttons */
+
+button {
+    background: #1976d2;
+    color: #ffffff;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+button:hover {
+    background: #1565c0;
+}
+
+.button-secondary {
+    background: #333333;
+}
+
+.button-secondary:hover {
+    background: #444444;
+}
+
+.button-danger {
+    background: #d32f2f;
+}
+
+.button-danger:hover {
+    background: #b71c1c;
+}
+
+.button-group {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+/* Form */
+
+.form-group {
+    margin-bottom: 12px;
+}
+
+.form-group label {
+    display: block;
+    font-size: 13px;
+    font-weight: 500;
+    color: #aaaaaa;
+    margin-bottom: 4px;
+}
+
+.form-group input,
+.form-group textarea {
+    width: 100%;
+    background: #0f0f0f;
+    border: 1px solid #333333;
+    border-radius: 6px;
+    padding: 8px 10px;
+    color: #e0e0e0;
+    font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    resize: vertical;
+}
+
+.form-group input:focus,
+.form-group textarea:focus {
+    outline: none;
+    border-color: #1976d2;
+}
+
+.form-group input::placeholder,
+.form-group textarea::placeholder {
+    color: #555555;
+}
+
+/* Instructions */
+
+.instructions {
+    margin: 12px 0;
+    padding-left: 20px;
+}
+
+.instructions li {
+    margin-bottom: 6px;
+    color: #cccccc;
+}
+
+.instructions code {
+    background: #0f0f0f;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    color: #e0e0e0;
+}
+
+.instructions a {
+    color: #42a5f5;
+    text-decoration: none;
+}
+
+.instructions a:hover {
+    text-decoration: underline;
+}
+
+/* Error message */
+
+.error-message {
+    background: #2a1515;
+    border: 1px solid #d32f2f;
+    border-radius: 6px;
+    padding: 8px 12px;
+    color: #ef9a9a;
+    font-size: 13px;
+    margin-top: 8px;
+}
+
+/* Auth user display */
+
+.auth-user {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.auth-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.auth-user-info {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+}
+
+.auth-email {
+    font-size: 13px;
+    color: #888888;
+}
+
+/* Text helpers */
+
+p {
+    margin-bottom: 12px;
+    color: #cccccc;
+}
+
+.muted {
+    color: #666666;
+    font-style: italic;
+}
+
+/* System info */
+
+.system-info {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.info-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.info-label {
+    color: #888888;
+    font-size: 13px;
+}
+
+/* Speakers list */
+
+.speaker-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 0;
+    border-bottom: 1px solid #2a2a2a;
+}
+
+.speaker-item:last-child {
+    border-bottom: none;
+}
+
+.speaker-name {
+    font-weight: 500;
+    color: #ffffff;
+}
+
+.speaker-backend {
+    font-size: 12px;
+    color: #888888;
+    background: #252525;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
+.speaker-status {
+    font-size: 12px;
+    margin-left: auto;
+}
+
+.speaker-status-connected {
+    color: #388e3c;
+}
+
+.speaker-status-disconnected {
+    color: #888888;
+}
+
+/* Speakers header with add button */
+
+.speakers-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+.speakers-header h2 {
+    margin-bottom: 0;
+}
+
+.speakers-header button {
+    font-size: 13px;
+    padding: 6px 12px;
+}
+
+/* Speaker card */
+
+.speaker-card {
+    background: #111111;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 8px;
+}
+
+.speaker-card-playing {
+    display: flex;
+    gap: 12px;
+}
+
+.speaker-album-art {
+    width: 72px;
+    height: 72px;
+    border-radius: 6px;
+    flex-shrink: 0;
+    background: #252525;
+    object-fit: cover;
+}
+
+.speaker-album-art-placeholder {
+    width: 72px;
+    height: 72px;
+    border-radius: 6px;
+    flex-shrink: 0;
+    background: #252525;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #555;
+    font-size: 24px;
+}
+
+.speaker-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.speaker-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+    flex-wrap: wrap;
+}
+
+.speaker-badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    white-space: nowrap;
+}
+
+.badge-playing {
+    background: #1b3a1b;
+    color: #6fbf6f;
+}
+
+.badge-paused {
+    background: #3a3a1b;
+    color: #bfbf6f;
+}
+
+.badge-idle {
+    background: #2a2a2a;
+    color: #888888;
+}
+
+.badge-disconnected {
+    background: #3a1b1b;
+    color: #bf6f6f;
+}
+
+.badge-starting {
+    background: #3a3a1b;
+    color: #bfbf6f;
+}
+
+.badge-dlna {
+    background: #1a2a3a;
+    color: #6fa8dc;
+}
+
+.badge-local {
+    background: #2a1a3a;
+    color: #b07ab0;
+}
+
+.speaker-track {
+    color: #e0e0e0;
+    font-size: 14px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.speaker-artist-album {
+    color: #888888;
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.speaker-meta {
+    display: flex;
+    gap: 12px;
+    color: #666666;
+    font-size: 12px;
+    margin-top: 4px;
+}
+
+.speaker-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+    align-self: flex-start;
+}
+
+.speaker-actions button {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    color: #aaa;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+}
+
+.speaker-actions button:hover {
+    background: #252525;
+    color: #fff;
+}
+
+.speaker-idle-info {
+    color: #666666;
+    font-size: 13px;
+}
+
+/* Edit form (inline) */
+
+.speaker-edit-card {
+    background: #111111;
+    border: 2px solid #1976d2;
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 8px;
+}
+
+.speaker-edit-card .form-group {
+    margin-bottom: 10px;
+}
+
+.speaker-edit-card .form-group input,
+.speaker-edit-card .form-group select {
+    width: 100%;
+    background: #0f0f0f;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 8px 10px;
+    color: #e0e0e0;
+    font-size: 14px;
+}
+
+.speaker-edit-card .form-row {
+    display: flex;
+    gap: 8px;
+}
+
+.speaker-edit-card .form-row .form-group {
+    flex: 1;
+}
+
+/* Add speaker panel */
+
+#add-speaker-panel {
+    margin-top: 12px;
+    border-top: 1px solid #2a2a2a;
+    padding-top: 12px;
+}
+
+.add-step-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+.step-number {
+    background: #1976d2;
+    color: #fff;
+    width: 22px;
+    height: 22px;
+    border-radius: 11px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 600;
+    flex-shrink: 0;
+}
+
+.backend-cards {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.backend-card {
+    flex: 1;
+    background: #1a1a1a;
+    border: 2px solid #2a2a2a;
+    border-radius: 8px;
+    padding: 12px;
+    cursor: pointer;
+    transition: border-color 0.15s;
+}
+
+.backend-card:hover {
+    border-color: #555;
+}
+
+.backend-card.selected {
+    border-color: #1976d2;
+}
+
+.backend-card h3 {
+    font-size: 14px;
+    margin-bottom: 4px;
+}
+
+.backend-card p {
+    font-size: 12px;
+    color: #888;
+    margin: 0;
+}
+
+.device-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 12px;
+}
+
+.device-item {
+    background: #1a1a1a;
+    border: 2px solid #2a2a2a;
+    border-radius: 8px;
+    padding: 10px 14px;
+    cursor: pointer;
+    transition: border-color 0.15s;
+}
+
+.device-item:hover {
+    border-color: #555;
+}
+
+.device-item.selected {
+    border-color: #1976d2;
+}
+
+.device-item-name {
+    font-weight: 500;
+    color: #fff;
+}
+
+.device-item-detail {
+    font-size: 12px;
+    color: #666;
+}
+
+.scan-status {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 13px;
+    color: #888;
+}
+
+.manual-entry-link {
+    color: #42a5f5;
+    font-size: 13px;
+    cursor: pointer;
+    border: none;
+    background: none;
+    padding: 0;
+}
+
+.manual-entry-link:hover {
+    text-decoration: underline;
+    background: none;
+}
+
+.manual-entry-link:disabled {
+    color: #555;
+    cursor: not-allowed;
+    text-decoration: none;
+}
+
+.scan-actions {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+}
+
+/* ==========================================================================
+   Qobuz Bridge for Music Assistant (this fork)
+   Everything for the Music Assistant panel lives below, in one block at the
+   end, so merges of upstream style.css changes stay clean. Phone first.
+   ========================================================================== */
+
+.container [hidden] {
+    display: none !important;
+}
+
+/* MA sections stay hidden until ma.js knows the server has MA support */
+body:not(.ma-ready) .ma-only,
+body.ma-unavailable .ma-only {
+    display: none !important;
+}
+
+.ma-sr {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.container a {
+    color: #64b5f6;
+}
+
+.ma-header {
+    margin-bottom: 16px;
+}
+
+.ma-header h1 {
+    margin-bottom: 2px;
+}
+
+.ma-subtitle {
+    margin: 0;
+    color: #a8a8a8;
+    font-size: 14px;
+}
+
+.ma-step {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    margin-right: 8px;
+    border-radius: 11px;
+    background: #1976d2;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 700;
+    vertical-align: 1px;
+}
+
+.ma-button {
+    min-height: 44px;
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-size: 15px;
+}
+
+.ma-button:disabled {
+    opacity: 0.65;
+    cursor: progress;
+}
+
+.ma-button:focus-visible,
+.ma-link:focus-visible,
+.ma-details > summary:focus-visible {
+    outline: 2px solid #90caf9;
+    outline-offset: 2px;
+}
+
+.ma-link {
+    display: inline-block;
+    min-height: 40px;
+    padding: 8px 0;
+    border: none;
+    background: none;
+    color: #64b5f6;
+    font-size: 14px;
+    text-decoration: underline;
+    cursor: pointer;
+}
+
+.ma-link:hover {
+    background: none;
+    color: #90caf9;
+}
+
+.ma-link:disabled {
+    color: #777;
+    cursor: default;
+}
+
+.ma-note {
+    margin: 6px 0 0;
+    color: #a8a8a8;
+    font-size: 13px;
+    font-style: normal;
+}
+
+.ma-message {
+    margin: 0 0 14px;
+    padding: 10px 12px;
+    border: 1px solid #3a3a3a;
+    border-radius: 8px;
+    background: #1f1f1f;
+    color: #d0d0d0;
+    font-size: 14px;
+}
+
+.ma-message-error {
+    border-color: #d32f2f;
+    background: #2a1515;
+    color: #ffcdd2;
+}
+
+.ma-message-warn {
+    border-color: #a07800;
+    background: #2a2210;
+    color: #ffe082;
+}
+
+.ma-message-pending {
+    border-color: #3a3a3a;
+    background: #1f1f1f;
+    color: #d0d0d0;
+}
+
+#ma-offline {
+    margin: 12px 0 0;
+}
+
+#ma-unsupported {
+    margin-bottom: 0;
+}
+
+.card .error-message[role="alert"] {
+    margin: 0 0 12px;
+    font-size: 14px;
+}
+
+/* Status checks */
+
+.check-card-ok {
+    border-color: #2e5e30;
+}
+
+.check-card-error {
+    border-color: #6b2626;
+}
+
+.check-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    list-style: none;
+}
+
+.check {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+}
+
+.check-icon {
+    display: flex;
+    flex: 0 0 26px;
+    align-items: center;
+    justify-content: center;
+    height: 26px;
+    border-radius: 50%;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.check-ok .check-icon {
+    background: #1b3a1b;
+    color: #81c784;
+}
+
+.check-warn .check-icon {
+    background: #3d300c;
+    color: #ffca28;
+}
+
+.check-error .check-icon {
+    background: #3d1717;
+    color: #ef9a9a;
+}
+
+.check-pending .check-icon {
+    background: #2c2c2c;
+    color: #bdbdbd;
+}
+
+.check-body {
+    flex: 1;
+    min-width: 0;
+}
+
+.check-title {
+    display: block;
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.check-detail {
+    display: block;
+    color: #c4c4c4;
+    font-size: 14px;
+    overflow-wrap: anywhere;
+}
+
+/* Qobuz login hint */
+
+.ma-hint {
+    margin-top: 14px;
+    padding: 12px;
+    border-radius: 8px;
+    background: #141c26;
+    font-size: 14px;
+}
+
+.ma-hint p {
+    margin: 0 0 8px;
+    color: #d0d0d0;
+}
+
+.ma-hint p:last-child {
+    margin-bottom: 0;
+}
+
+.ma-hint a {
+    overflow-wrap: anywhere;
+}
+
+.ma-hint .ma-hint-warn {
+    color: #ffe082;
+}
+
+.ma-hint .ma-hint-fallback {
+    color: #a8a8a8;
+    font-size: 13px;
+}
+
+#qobuz-card .auth-user {
+    flex-wrap: wrap;
+}
+
+#qobuz-card .auth-user .ma-button {
+    margin-left: auto;
+}
+
+/* Music Assistant login */
+
+.ma-connected-text {
+    color: #d8d8d8;
+    overflow-wrap: anywhere;
+}
+
+.ma-connected-text strong {
+    color: #fff;
+    font-weight: 600;
+}
+
+.ma-form h3 {
+    margin: 0 0 12px;
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.ma-field {
+    margin-bottom: 14px;
+}
+
+.ma-field label {
+    display: block;
+    margin-bottom: 6px;
+    color: #d0d0d0;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.ma-field input,
+.ma-field textarea {
+    width: 100%;
+    min-height: 44px;
+    padding: 10px 12px;
+    border: 1px solid #444;
+    border-radius: 8px;
+    background: #0f0f0f;
+    color: #f0f0f0;
+    font-family: inherit;
+    /* 16px keeps iOS from zooming in when a field gets focus */
+    font-size: 16px;
+}
+
+.ma-field textarea {
+    resize: vertical;
+    font-family: "SF Mono", "Fira Code", Menlo, Consolas, monospace;
+    word-break: break-all;
+}
+
+.ma-field input:focus,
+.ma-field textarea:focus {
+    outline: none;
+    border-color: #42a5f5;
+    box-shadow: 0 0 0 1px #42a5f5;
+}
+
+.ma-field input[readonly],
+.ma-field textarea[readonly] {
+    color: #9a9a9a;
+}
+
+.ma-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 4px;
+}
+
+.ma-help {
+    margin: 14px 0 0;
+    color: #a8a8a8;
+    font-size: 13px;
+}
+
+/* Speakers in the Qobuz app: switches */
+
+.toggle {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-height: 56px;
+    padding: 10px 0;
+    border-bottom: 1px solid #2a2a2a;
+    cursor: pointer;
+}
+
+.toggle-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.toggle-label {
+    display: block;
+    color: #fff;
+    font-weight: 500;
+}
+
+.toggle-sub {
+    display: block;
+    color: #a8a8a8;
+    font-size: 13px;
+}
+
+/* the real checkbox stays focusable for keyboards and screen readers */
+.toggle input {
+    position: absolute;
+    right: 0;
+    width: 48px;
+    height: 28px;
+    margin: 0;
+    opacity: 0;
+    cursor: pointer;
+}
+
+.toggle-switch {
+    position: relative;
+    flex: 0 0 48px;
+    height: 28px;
+    border-radius: 14px;
+    background: #4a4a4a;
+    transition: background 0.15s;
+}
+
+.toggle-switch::after {
+    content: "";
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform 0.15s;
+}
+
+.toggle input:checked + .toggle-switch {
+    background: #1976d2;
+}
+
+.toggle input:checked + .toggle-switch::after {
+    transform: translateX(20px);
+}
+
+.toggle input:focus-visible + .toggle-switch {
+    outline: 2px solid #90caf9;
+    outline-offset: 2px;
+}
+
+/* Speakers in the Qobuz app: player list */
+
+.ma-players {
+    list-style: none;
+}
+
+.ma-player + .ma-player {
+    border-top: 1px solid #2a2a2a;
+}
+
+.ma-player-row {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr) auto;
+    grid-template-areas:
+        "check main status"
+        ".     np   np";
+    column-gap: 12px;
+    row-gap: 6px;
+    align-items: start;
+    min-height: 56px;
+    padding: 12px 0;
+    cursor: pointer;
+}
+
+.ma-player.is-locked .ma-player-row {
+    cursor: default;
+}
+
+.ma-player-check {
+    grid-area: check;
+    width: 22px;
+    height: 22px;
+    margin: 1px 0 0;
+    accent-color: #1976d2;
+    cursor: inherit;
+}
+
+.ma-player-main {
+    grid-area: main;
+    min-width: 0;
+}
+
+.ma-player-name {
+    margin-right: 6px;
+    color: #fff;
+    font-weight: 500;
+    overflow-wrap: anywhere;
+}
+
+.ma-badges {
+    display: inline;
+}
+
+.badge-ma {
+    display: inline-block;
+    margin: 2px 4px 0 0;
+    padding: 1px 8px;
+    border-radius: 10px;
+    background: #2a2a2a;
+    color: #bdbdbd;
+    font-size: 12px;
+    white-space: nowrap;
+    vertical-align: 1px;
+}
+
+.badge-ma-group {
+    background: #1a2a3a;
+    color: #90c2f0;
+}
+
+.badge-ma-offline {
+    background: #3a1b1b;
+    color: #f0a0a0;
+}
+
+.badge-ma-muted {
+    background: #2a2a2a;
+    color: #bdbdbd;
+}
+
+.ma-player-sub {
+    display: block;
+    margin-top: 2px;
+    color: #a8a8a8;
+    font-size: 13px;
+    overflow-wrap: anywhere;
+}
+
+.ma-player-status {
+    grid-area: status;
+    padding: 2px 10px;
+    border-radius: 10px;
+    background: #2a2a2a;
+    color: #c4c4c4;
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.ma-status-playing {
+    background: #1b3a1b;
+    color: #8fd18f;
+}
+
+.ma-status-paused,
+.ma-status-starting {
+    background: #3a3a1b;
+    color: #e0d77a;
+}
+
+.ma-status-idle {
+    background: #1a2a3a;
+    color: #90c2f0;
+}
+
+.ma-np {
+    grid-area: np;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.ma-np-art {
+    flex: 0 0 36px;
+    width: 36px;
+    height: 36px;
+    border-radius: 4px;
+    background: #252525;
+    object-fit: cover;
+}
+
+.ma-np-art-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #777;
+    font-size: 16px;
+}
+
+.ma-np-text {
+    flex: 1;
+    min-width: 0;
+    font-size: 13px;
+    line-height: 1.35;
+}
+
+.ma-np-title,
+.ma-np-artist {
+    display: block;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.ma-np-title {
+    color: #e0e0e0;
+}
+
+.ma-np-artist {
+    color: #a8a8a8;
+}
+
+.ma-players-note {
+    margin: 12px 0 4px;
+}
+
+.ma-empty {
+    margin: 14px 0 0;
+    color: #a8a8a8;
+    font-size: 14px;
+}
+
+@media (min-width: 600px) {
+    .ma-player-row {
+        grid-template-columns: 24px minmax(0, 1fr) auto;
+        grid-template-areas:
+            "check main status"
+            "check main np";
+    }
+
+    .ma-player-status {
+        justify-self: end;
+    }
+
+    .ma-np {
+        max-width: 260px;
+        justify-self: end;
+    }
+}
+
+/* Other speakers (upstream DLNA / local section) */
+
+.ma-details {
+    margin-bottom: 16px;
+}
+
+.ma-details > summary {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 52px;
+    padding: 12px 16px;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+    background: #1a1a1a;
+    color: #e0e0e0;
+    font-weight: 600;
+    list-style: none;
+    cursor: pointer;
+}
+
+.ma-details > summary::-webkit-details-marker {
+    display: none;
+}
+
+.ma-details > summary::before {
+    content: "\25B8";
+    color: #a8a8a8;
+    transition: transform 0.15s;
+}
+
+.ma-details[open] > summary::before {
+    transform: rotate(90deg);
+}
+
+.ma-details-note {
+    margin: 10px 2px;
+}
+
+/* Footer (version / uptime) */
+
+.ma-footer {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 6px;
+    padding: 8px 0 16px;
+    color: #8f8f8f;
+    font-size: 13px;
+}
