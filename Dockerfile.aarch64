@@ -1,0 +1,59 @@
+# Home Assistant add-on image for Qobuz Bridge for Music Assistant.
+#
+# The Supervisor builds this on the Home Assistant box, with the repository root
+# as the build context (config.json sits at the root). It prefers
+# Dockerfile.<arch> over ./Dockerfile (supervisor/apps/build.py:151-158), so
+# ./Dockerfile stays upstream QobuzProxy's standalone image, untouched.
+#
+# Dockerfile.amd64 and Dockerfile.aarch64 MUST stay identical: each arch picks
+# its own file, and a missing one would fall back to the upstream Dockerfile.
+
+FROM python:3.13-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_ROOT_USER_ACTION=ignore \
+    QOBUZPROXY_DATA_DIR=/data
+
+WORKDIR /app
+
+# Dependencies first, so code changes reuse this layer (rebuilds on a
+# Raspberry Pi stay quick). uv only turns uv.lock into a hash-pinned
+# requirements file and is removed again; pip then installs exactly the locked
+# versions and refuses anything whose hash does not match.
+COPY pyproject.toml uv.lock ./
+RUN pip install uv==0.11.32 \
+    && uv export --frozen --no-dev --no-emit-project --extra music-assistant \
+        --quiet -o /tmp/requirements.txt \
+    && pip uninstall -y uv \
+    && pip install --require-hashes -r /tmp/requirements.txt \
+    && rm /tmp/requirements.txt
+
+# The app itself (its dependencies are already installed above).
+COPY README.md ./
+COPY protos/ ./protos/
+COPY qobuz_proxy/ ./qobuz_proxy/
+RUN pip install --no-deps . \
+    && rm -rf /app/build /app/*.egg-info
+
+COPY rootfs/ /
+
+# Run from /data, not the source tree, so "python -c" never imports /app's
+# copy and "./config.yaml" is the persistent /data/config.yaml.
+WORKDIR /data
+
+# Passed by the Supervisor on every build (supervisor/apps/build.py:251-253).
+# Declared this late so a version bump does not invalidate the layers above.
+ARG BUILD_VERSION=dev
+ARG BUILD_ARCH
+# Shown next to the version in the web UI. Only the add-on version: the app
+# keeps the first 7 characters (qobuz_proxy/__init__.py _detect_commit).
+ENV QOBUZPROXY_COMMIT="${BUILD_VERSION}"
+
+# Runs as root on purpose: /data is a root-owned bind mount created by the
+# Supervisor, and it writes options.json there on every start.
+# No HEALTHCHECK: the "watchdog" URL in config.json checks liveness instead.
+# tini (config.json "init", default true) is PID 1, and run.sh execs the app,
+# so SIGTERM reaches Python.
+CMD ["/bin/sh", "/run.sh"]

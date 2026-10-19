@@ -59,6 +59,10 @@ config.yaml
 # Docker volume mount: holds credentials.json and config.yaml at runtime
 /data/
 
+# Music Assistant token and settings, if a dev run uses the repo as its data dir
+/music_assistant.json
+/credentials.json
+
 # macOS
 .DS_Store
 
