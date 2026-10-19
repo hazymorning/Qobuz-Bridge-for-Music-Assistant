@@ -112,40 +112,40 @@
     }
 
     function renderMusicAssistant(st) {
-        var form = $("ma-form");
+        var form = $("music-assistant-form");
         if (form.contains(document.activeElement)) return; // don't move things while typing
         var conn = st.connection;
         var connected = conn.state === "connected";
-        show($("ma-connected"), connected);
+        show($("music-assistant-connected"), connected);
         show(form, !connected);
         if (connected) {
-            $("ma-connected-text").textContent =
+            $("music-assistant-connected-text").textContent =
                 "Connected to Music Assistant " + conn.server_version + " at " + conn.url +
                 (conn.username ? " as " + conn.username : "") + ".";
             return;
         }
         var message = "";
-        if (st.configured && conn.state === "connecting") {
+        if (st.is_configured && conn.state === "connecting") {
             message = "Connecting to Music Assistant at " + conn.url + "…";
-        } else if (st.configured && conn.state === "disconnected") {
+        } else if (st.is_configured && conn.state === "disconnected") {
             message = conn.message + " The add-on keeps trying on its own; connect again only " +
                 "if the address or login changed.";
         } else if (conn.state === "auth_failed" || conn.message) {
             message = conn.message;
         }
-        $("ma-message").textContent = message;
-        show($("ma-message"), !!message);
-        if (!$("ma-url").value) $("ma-url").value = conn.url;
-        if (!$("ma-username").value) $("ma-username").value = conn.username;
+        $("music-assistant-message").textContent = message;
+        show($("music-assistant-message"), !!message);
+        if (!$("music-assistant-url").value) $("music-assistant-url").value = conn.url;
+        if (!$("music-assistant-username").value) $("music-assistant-username").value = conn.username;
     }
 
     function renderPlayers(st) {
         $("expose-all").checked = st.expose_all;
-        if (!changed("players", [st.expose_all, st.configured, st.players])) return;
+        if (!changed("players", [st.expose_all, st.is_configured, st.players])) return;
         var list = $("players");
         list.textContent = "";
         st.players.forEach(function (p) {
-            var shown = !!p.device_name;
+            var shown = !!p.speaker_name;
             var box = el("input");
             box.type = "checkbox";
             box.dataset.id = p.player_id;
@@ -157,16 +157,16 @@
             text.appendChild(el("span", "player-name", p.name));
             if (TYPES[p.type]) text.appendChild(el("span", "badge", TYPES[p.type]));
             if (!p.available) text.appendChild(el("span", "badge", "Offline"));
-            if (p.hidden) text.appendChild(el("span", "badge", "Hidden in MA"));
+            if (p.hidden) text.appendChild(el("span", "badge", "Hidden in Music Assistant"));
             text.appendChild(el("span", "note",
-                shown ? "Shows as “" + p.device_name + "”" : "Not in the Qobuz app"));
+                shown ? "Shows as “" + p.speaker_name + "”" : "Not in the Qobuz app"));
             label.appendChild(text);
             var item = el("li");
             item.appendChild(label);
             list.appendChild(item);
         });
         var empty = "";
-        if (!st.configured) empty = "Connect to Music Assistant to see your players.";
+        if (!st.is_configured) empty = "Connect to Music Assistant to see your players.";
         else if (!st.players.length) empty = "Your players show up here once Music Assistant is connected.";
         $("players-empty").textContent = empty;
         show($("players-empty"), !!empty);
@@ -182,7 +182,7 @@
 
     function poll() {
         clearTimeout(pollTimer);
-        request("GET", "api/ma/status").then(function (st) {
+        request("GET", "api/music-assistant/status").then(function (st) {
             failures = 0;
             show($("offline"), false);
             if (!busy) render(st);
@@ -215,25 +215,25 @@
     function onConnect(event) {
         event.preventDefault();
         var body = {
-            url: $("ma-url").value.trim(),
-            username: $("ma-username").value.trim(),
-            password: $("ma-password").value
+            url: $("music-assistant-url").value.trim(),
+            username: $("music-assistant-username").value.trim(),
+            password: $("music-assistant-password").value
         };
-        $("ma-connect").disabled = true;
-        $("ma-connect").textContent = "Connecting…";
+        $("music-assistant-connect").disabled = true;
+        $("music-assistant-connect").textContent = "Connecting…";
         document.activeElement.blur();
-        send("POST", "api/ma/connect", body, $("ma-error")).then(function () {
-            $("ma-password").value = "";
+        send("POST", "api/music-assistant/connect", body, $("music-assistant-error")).then(function () {
+            $("music-assistant-password").value = "";
         }, function () {}).then(function () {
-            $("ma-connect").disabled = false;
-            $("ma-connect").textContent = "Connect";
+            $("music-assistant-connect").disabled = false;
+            $("music-assistant-connect").textContent = "Connect";
         });
     }
 
     function onDisconnect() {
         if (window.confirm("Disconnect from Music Assistant? Your Music Assistant players " +
                 "disappear from the Qobuz app until you connect again.")) {
-            send("POST", "api/ma/disconnect", undefined, $("ma-error")).catch(function () {});
+            send("POST", "api/music-assistant/disconnect", undefined, $("music-assistant-error")).catch(function () {});
         }
     }
 
@@ -241,15 +241,15 @@
         var on = event.target.checked;
         var body = { expose_all: on };
         // Switching "all" off with nothing ticked yet: start from what the Qobuz app shows now,
-        // so it doesn't lose every device at once.
+        // so it doesn't lose every speaker at once.
         if (!on && last && !last.players.some(function (p) { return p.selected; })) {
             body.selected = last.players.filter(function (p) {
-                return p.device_name;
+                return p.speaker_name;
             }).map(function (p) {
                 return p.player_id;
             });
         }
-        send("PUT", "api/ma/players", body, $("players-error")).catch(function () {});
+        send("PUT", "api/music-assistant/players", body, $("players-error")).catch(function () {});
     }
 
     function onPlayerTicked(event) {
@@ -260,13 +260,13 @@
         }).map(function (p) {
             return p.player_id;
         });
-        send("PUT", "api/ma/players", { selected: selected }, $("players-error")).catch(function () {});
+        send("PUT", "api/music-assistant/players", { selected: selected }, $("players-error")).catch(function () {});
     }
 
     $("qobuz-login").addEventListener("click", onLogin);
     $("qobuz-logout").addEventListener("click", onLogout);
-    $("ma-form").addEventListener("submit", onConnect);
-    $("ma-disconnect").addEventListener("click", onDisconnect);
+    $("music-assistant-form").addEventListener("submit", onConnect);
+    $("music-assistant-disconnect").addEventListener("click", onDisconnect);
     $("expose-all").addEventListener("change", onExposeAll);
     $("players").addEventListener("change", onPlayerTicked);
     // Coming back from the Qobuz login tab: refresh right away

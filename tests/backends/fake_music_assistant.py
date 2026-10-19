@@ -1,13 +1,13 @@
 """In-memory Music Assistant 2.10.7 server that drives the real ``music-assistant-client``.
 
-:class:`FakeMAServer` keeps what a real MA server keeps (players, queues, queue items,
+:class:`FakeMusicAssistantServer` keeps what a real MA server keeps (players, queues, queue items,
 providers, tokens) and outlives the single-use clients the product builds on every reconnect.
 Its queue logic is a port of MA 2.10.7 ``controllers/player_queues`` and it emits the same
 events in the same order. Only the websocket is fake: :class:`FakeMusicAssistantClient` is the
 real client with :class:`FakeWebsocketsConnection` swapped in, so the product's error handling
 and event races run against real client code.
 
-Time never passes on its own: :meth:`FakeMAServer.advance_time`, ``finish_current_track``,
+Time never passes on its own: :meth:`FakeMusicAssistantServer.advance_time`, ``finish_current_track``,
 ``mark_ended`` and ``auto_stop_after_pause`` stand in for MA's timers, and ``settle()`` only
 yields to the event loop, so tests patch the product's timing constants.
 """
@@ -109,7 +109,7 @@ DEFAULT_PLAYER_FEATURES = frozenset(
         PlayerFeature.PLAY_MEDIA,
     }
 )
-# Commands that only read state. ``FakeMAServer.writes`` filters these out of ``command_log``.
+# Commands that only read state. ``FakeMusicAssistantServer.writes`` filters these out of ``command_log``.
 READ_COMMANDS = frozenset(
     {
         "providers",
@@ -167,7 +167,9 @@ class _TokenInfo:
 class _ServerSocket:
     """Server side of one websocket connection: the queue of frames waiting for the client."""
 
-    def __init__(self, server: FakeMAServer, connection: FakeWebsocketsConnection) -> None:
+    def __init__(
+        self, server: FakeMusicAssistantServer, connection: FakeWebsocketsConnection
+    ) -> None:
         self.server = server
         self.connection = connection
         self.authenticated = False
@@ -227,12 +229,12 @@ class FakeWebsocketsConnection:
 
     Same public surface (``ws_server_url``, ``auth_token``, ``ssl_context``, ``connected``,
     ``connect``, ``disconnect``, ``receive_message``, ``send_message``) and the same exceptions,
-    but the frames go to a :class:`FakeMAServer` instead of aiohttp.
+    but the frames go to a :class:`FakeMusicAssistantServer` instead of aiohttp.
     """
 
     def __init__(
         self,
-        server: FakeMAServer,
+        server: FakeMusicAssistantServer,
         server_url: str,
         aiohttp_session: Optional[aiohttp.ClientSession],
         auth_token: Optional[str] = None,
@@ -304,14 +306,14 @@ class FakeWebsocketsConnection:
 
 
 class FakeMusicAssistantClient(MusicAssistantClient):
-    """The real ``MusicAssistantClient`` wired to a :class:`FakeMAServer`.
+    """The real ``MusicAssistantClient`` wired to a :class:`FakeMusicAssistantServer`.
 
     Do not instantiate this class directly: use ``server.client_class`` (a subclass bound to the
     server) or ``server.client_factory(url, session, token)``. The constructor signature is the
     real one, so the bound class can also replace ``MusicAssistantClient`` via monkeypatch.
     """
 
-    _fake_server: ClassVar[Optional[FakeMAServer]] = None
+    _fake_server: ClassVar[Optional[FakeMusicAssistantServer]] = None
 
     def __init__(
         self,
@@ -324,8 +326,8 @@ class FakeMusicAssistantClient(MusicAssistantClient):
         server = type(self)._fake_server
         if server is None:
             raise TypeError(
-                "Create fake clients through FakeMAServer.client_class or "
-                "FakeMAServer.client_factory so they are bound to a server"
+                "Create fake clients through FakeMusicAssistantServer.client_class or "
+                "FakeMusicAssistantServer.client_factory so they are bound to a server"
             )
         session_arg = aiohttp_session if aiohttp_session is not None else _SESSION_PLACEHOLDER
         super().__init__(server_url, session_arg, token, ssl_context, locale)  # type: ignore[arg-type]
@@ -341,7 +343,7 @@ class FakeMusicAssistantClient(MusicAssistantClient):
 # ------------------------------------------------------------------------------------------ server
 
 
-class FakeMAServer:
+class FakeMusicAssistantServer:
     """Shared state + behaviour of a Music Assistant 2.10.7 server (see the module docstring).
 
     State a test may read or set directly:
@@ -862,7 +864,7 @@ class FakeMAServer:
             self._handle_stop(queue_id)
             return True
 
-    def user_plays_foreign(
+    def user_plays_something_else(
         self,
         queue_id: str,
         name: str = "Radio",
@@ -900,7 +902,7 @@ class FakeMAServer:
     def switch_source(self, player_id: str, source: Optional[str] = "spotify") -> None:
         """The speaker switches to another source (PLAYER_UPDATED, then QUEUE_UPDATED).
 
-        For a foreign source, the speaker plays it, ``player.active_source = source`` and the
+        For an external source, the player plays it, ``player.active_source = source`` and the
         queue goes ``active=False`` / IDLE. Like MA, the QUEUE_UPDATED only comes when that
         changes the queue's state, item or position (a playing/paused queue). An idle queue
         goes inactive silently: only the PLAYER_UPDATED tells. ``source`` equal to the player id
@@ -1761,7 +1763,7 @@ class FakeMAServer:
         with self._play_action(queue_id):
             self._play_index(queue_id, queue.current_index, seek_position=position)
 
-    # ------------------------------------------------------------------ device (speaker)
+    # ------------------------------------------------------------------ device (the player)
 
     def _get_player(self, player_id: str, raise_unavailable: bool = False) -> Optional[Player]:
         player = self.players.get(player_id)

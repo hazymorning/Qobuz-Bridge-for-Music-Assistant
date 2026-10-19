@@ -21,7 +21,7 @@ DEFAULT_URL = "http://127.0.0.1:8095"
 
 @dataclass
 class KnownPlayer:
-    """An MA player that was exposed before; keeps its device and port across restarts."""
+    """An MA player that was exposed before; keeps its speaker and port across restarts."""
 
     name: str
     player_type: str  # "player", "stereo_pair" or "group"

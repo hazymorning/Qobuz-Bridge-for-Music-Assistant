@@ -34,7 +34,7 @@ from qobuz_proxy.backends.music_assistant.connection import (  # noqa: E402
     PlayerInfo,
     login_and_create_token,
 )
-from tests.backends.fake_music_assistant import DROP, DROP_HARD, HANG, FakeMAServer  # noqa: E402
+from tests.backends.fake_music_assistant import DROP, DROP_HARD, HANG, FakeMusicAssistantServer  # noqa: E402
 
 QID = "up1"
 REAL_RECONNECT_DELAYS = connection_module.RECONNECT_DELAYS_SECONDS  # before fast_timing
@@ -48,15 +48,15 @@ def fast_timing(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def server() -> FakeMAServer:
-    srv = FakeMAServer()
+def server() -> FakeMusicAssistantServer:
+    srv = FakeMusicAssistantServer()
     srv.add_qobuz_provider()
     srv.add_player(QID, "Kitchen")
     return srv
 
 
 @pytest.fixture
-async def conn(server: FakeMAServer) -> AsyncIterator[MusicAssistantConnection]:
+async def conn(server: FakeMusicAssistantServer) -> AsyncIterator[MusicAssistantConnection]:
     connection = MusicAssistantConnection(
         server.url, server.token, client_factory=server.client_factory
     )
@@ -65,7 +65,9 @@ async def conn(server: FakeMAServer) -> AsyncIterator[MusicAssistantConnection]:
 
 
 @pytest.fixture
-def ma_login(server: FakeMAServer, monkeypatch: pytest.MonkeyPatch) -> FakeMAServer:
+def login_server(
+    server: FakeMusicAssistantServer, monkeypatch: pytest.MonkeyPatch
+) -> FakeMusicAssistantServer:
     """Point the login helper at the fake server."""
     monkeypatch.setattr(connection_module, "login", server.login)
     monkeypatch.setattr(connection_module, "MusicAssistantClient", server.client_class)
@@ -73,7 +75,7 @@ def ma_login(server: FakeMAServer, monkeypatch: pytest.MonkeyPatch) -> FakeMASer
 
 
 async def wait_for(
-    cond: Callable[[], bool], server: FakeMAServer, timeout: float = 2.0, what: str = ""
+    cond: Callable[[], bool], server: FakeMusicAssistantServer, timeout: float = 2.0, what: str = ""
 ) -> None:
     """Poll ``cond`` every 5 ms (letting the fake deliver frames) until it holds."""
     loop = asyncio.get_running_loop()
@@ -87,7 +89,7 @@ async def wait_for(
         await asyncio.sleep(0.005)
 
 
-async def idle(server: FakeMAServer, seconds: float) -> None:
+async def idle(server: FakeMusicAssistantServer, seconds: float) -> None:
     """Let real time pass (for 'nothing else happens' checks)."""
     await asyncio.sleep(seconds)
     await server.settle()
@@ -99,12 +101,12 @@ def record_states(connection: MusicAssistantConnection) -> list[ConnectionStatus
     return states
 
 
-async def connected(conn: MusicAssistantConnection, server: FakeMAServer) -> None:
+async def connected(conn: MusicAssistantConnection, server: FakeMusicAssistantServer) -> None:
     await conn.start()
     await wait_for(lambda: conn.is_connected, server, what="CONNECTED")
 
 
-def new_client(server: FakeMAServer, old: Any) -> bool:
+def new_client(server: FakeMusicAssistantServer, old: Any) -> bool:
     """Exactly one client is connected, and it is not ``old``."""
     return len(server.clients) == 1 and server.clients[0] is not old
 
@@ -124,19 +126,19 @@ class RecordedDelays(tuple):  # type: ignore[type-arg]
 
 class TestConnect:
     async def test_connects_and_reports_version_and_qobuz_provider(
-        self, conn: MusicAssistantConnection, server: FakeMAServer
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
     ) -> None:
         states = record_states(conn)
         await connected(conn, server)
 
         assert conn.status.state == ConnectionState.CONNECTED
         assert conn.status.server_version == "2.10.7"
-        assert conn.status.has_qobuz is True
+        assert conn.status.has_qobuz_provider is True
         assert [s.state for s in states] == [ConnectionState.CONNECTING, ConnectionState.CONNECTED]
 
     @pytest.mark.parametrize("provider", ["missing", "unavailable"])
     async def test_has_qobuz_needs_a_working_qobuz_provider(self, provider: str) -> None:
-        server = FakeMAServer()
+        server = FakeMusicAssistantServer()
         if provider == "unavailable":
             server.add_qobuz_provider(available=False)
         conn = MusicAssistantConnection(
@@ -144,12 +146,12 @@ class TestConnect:
         )
         try:
             await connected(conn, server)
-            assert conn.status.has_qobuz is False
+            assert conn.status.has_qobuz_provider is False
         finally:
             await conn.stop()
 
     async def test_lists_only_enabled_players_groups_and_stereo_pairs(
-        self, conn: MusicAssistantConnection, server: FakeMAServer
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
     ) -> None:
         server.add_player("grp", "Downstairs", type=PlayerType.GROUP, group_members=[QID])
         server.add_player("pair", "Living Room", type=PlayerType.STEREO_PAIR)
@@ -170,7 +172,7 @@ class TestConnect:
         assert players["shy"].hidden is True
 
     async def test_players_and_queues_come_from_the_cache(
-        self, conn: MusicAssistantConnection, server: FakeMAServer
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
     ) -> None:
         assert conn.players() == []
         assert conn.player(QID) is None and conn.queue(QID) is None
@@ -186,7 +188,7 @@ class TestConnect:
 
     @pytest.mark.parametrize("missing", ["url", "token"])
     async def test_without_address_or_token_it_does_not_connect(
-        self, server: FakeMAServer, missing: str
+        self, server: FakeMusicAssistantServer, missing: str
     ) -> None:
         url = "" if missing == "url" else server.url
         token = "" if missing == "token" else server.token
@@ -205,7 +207,10 @@ class TestConnect:
 
 class TestReconnect:
     async def test_unreachable_ma_is_retried_with_growing_backoff(
-        self, conn: MusicAssistantConnection, server: FakeMAServer, monkeypatch: pytest.MonkeyPatch
+        self,
+        conn: MusicAssistantConnection,
+        server: FakeMusicAssistantServer,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         delays = RecordedDelays(REAL_RECONNECT_DELAYS)
         delays.picked = []
@@ -227,7 +232,10 @@ class TestReconnect:
         await wait_for(lambda: conn.is_connected, server, what="CONNECTED")
 
     async def test_backoff_starts_over_after_a_working_connection_drops(
-        self, conn: MusicAssistantConnection, server: FakeMAServer, monkeypatch: pytest.MonkeyPatch
+        self,
+        conn: MusicAssistantConnection,
+        server: FakeMusicAssistantServer,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         delays = RecordedDelays(REAL_RECONNECT_DELAYS)
         delays.picked = []
@@ -247,7 +255,7 @@ class TestReconnect:
 
     @pytest.mark.parametrize("graceful", [True, False], ids=["closed", "error"])
     async def test_lost_connection_is_retried_until_ma_is_back_and_events_flow_again(
-        self, conn: MusicAssistantConnection, server: FakeMAServer, graceful: bool
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer, graceful: bool
     ) -> None:
         await connected(conn, server)
         old_client = server.clients[0]
@@ -271,7 +279,10 @@ class TestReconnect:
         await wait_for(lambda: any(e.event == EventType.QUEUE_UPDATED for e in events), server)
 
     async def test_hung_initial_load_times_out_and_retries(
-        self, conn: MusicAssistantConnection, server: FakeMAServer, monkeypatch: pytest.MonkeyPatch
+        self,
+        conn: MusicAssistantConnection,
+        server: FakeMusicAssistantServer,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(connection_module, "LOAD_TIMEOUT_SECONDS", 0.05)
         states = record_states(conn)
@@ -294,7 +305,7 @@ class TestReconnect:
 
 class TestAuth:
     async def test_revoked_token_stops_retrying(
-        self, conn: MusicAssistantConnection, server: FakeMAServer
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
     ) -> None:
         await connected(conn, server)
 
@@ -307,7 +318,7 @@ class TestAuth:
         assert conn.status.state == ConnectionState.AUTH_FAILED
 
     async def test_rejected_token_is_tried_once_and_a_new_one_connects(
-        self, server: FakeMAServer
+        self, server: FakeMusicAssistantServer
     ) -> None:
         conn = MusicAssistantConnection(server.url, "bogus", client_factory=server.client_factory)
         try:
@@ -330,7 +341,7 @@ class TestAuth:
     async def test_refused_connection_is_retried_not_treated_as_a_bad_login(
         self,
         conn: MusicAssistantConnection,
-        server: FakeMAServer,
+        server: FakeMusicAssistantServer,
         setting: str,
         refused: Any,
         fixed: Any,
@@ -346,7 +357,10 @@ class TestAuth:
         await wait_for(lambda: conn.is_connected, server)
 
     async def test_logs_never_contain_the_token(
-        self, conn: MusicAssistantConnection, server: FakeMAServer, caplog: pytest.LogCaptureFixture
+        self,
+        conn: MusicAssistantConnection,
+        server: FakeMusicAssistantServer,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         with caplog.at_level(logging.DEBUG):
             await connected(conn, server)
@@ -361,7 +375,7 @@ class TestAuth:
 
 class TestCall:
     async def test_returns_the_result(
-        self, conn: MusicAssistantConnection, server: FakeMAServer
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
     ) -> None:
         await connected(conn, server)
         server.start_playing(QID, ["1", "2"])
@@ -369,14 +383,14 @@ class TestCall:
         assert [i.media_item.item_id for i in items] == ["1", "2"]
 
     async def test_not_connected_raises_without_sending(
-        self, conn: MusicAssistantConnection, server: FakeMAServer
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
     ) -> None:
         with pytest.raises(NotConnectedError):
             await conn.call("stop", lambda c: c.player_queues.stop(QID))
         assert server.command_log == []
 
     async def test_ma_error_is_reraised_unchanged_and_keeps_the_connection(
-        self, conn: MusicAssistantConnection, server: FakeMAServer
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
     ) -> None:
         await connected(conn, server)
         server.fail_next["player_queues/play_media"] = MediaNotFoundError("Item 9 not found")
@@ -401,7 +415,7 @@ class TestCall:
         ids=lambda e: type(e).__name__,
     )
     async def test_connection_errors_map_to_not_connected(
-        self, conn: MusicAssistantConnection, server: FakeMAServer, error: Exception
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer, error: Exception
     ) -> None:
         await connected(conn, server)
 
@@ -413,7 +427,7 @@ class TestCall:
 
     @pytest.mark.parametrize("failure", [DROP, DROP_HARD])
     async def test_socket_drop_mid_call_maps_to_not_connected(
-        self, conn: MusicAssistantConnection, server: FakeMAServer, failure: str
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer, failure: str
     ) -> None:
         await connected(conn, server)
         old_client = server.clients[0]
@@ -425,7 +439,7 @@ class TestCall:
         await wait_for(lambda: conn.is_connected and new_client(server, old_client), server)
 
     async def test_our_own_cancellation_propagates(
-        self, conn: MusicAssistantConnection, server: FakeMAServer
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
     ) -> None:
         await connected(conn, server)
         server.gate("player_queues/stop")
@@ -440,13 +454,15 @@ class TestCall:
         server.release("player_queues/stop")
         assert conn.is_connected
 
-    async def pause_times_out(self, conn: MusicAssistantConnection, server: FakeMAServer) -> None:
+    async def pause_times_out(
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
+    ) -> None:
         server.fail_next["player_queues/pause"] = HANG
         with pytest.raises(NotConnectedError):
             await conn.call("pause", lambda c: c.player_queues.pause(QID), timeout=0.05)
 
     async def test_two_timeouts_in_a_row_force_a_reconnect(
-        self, conn: MusicAssistantConnection, server: FakeMAServer
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
     ) -> None:
         await connected(conn, server)
         old_client = server.clients[0]
@@ -456,7 +472,7 @@ class TestCall:
         await wait_for(lambda: conn.is_connected and new_client(server, old_client), server)
 
     async def test_timeouts_separated_by_an_answer_keep_the_connection(
-        self, conn: MusicAssistantConnection, server: FakeMAServer
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
     ) -> None:
         await connected(conn, server)
         client = server.clients[0]
@@ -474,7 +490,7 @@ class TestCall:
 
 class TestListeners:
     async def test_event_listeners_per_object_and_global(
-        self, conn: MusicAssistantConnection, server: FakeMAServer
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
     ) -> None:
         await connected(conn, server)
         mine: list[Any] = []
@@ -494,7 +510,7 @@ class TestListeners:
         assert len(everything) > len(mine)
 
     async def test_listener_sees_the_updated_cache(
-        self, conn: MusicAssistantConnection, server: FakeMAServer
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
     ) -> None:
         await connected(conn, server)
         server.start_playing(QID, ["1"])
@@ -515,7 +531,7 @@ class TestListeners:
         assert all(cached == wire for cached, wire in seen)
 
     async def test_failing_listener_does_not_break_dispatch(
-        self, conn: MusicAssistantConnection, server: FakeMAServer
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
     ) -> None:
         await connected(conn, server)
 
@@ -536,7 +552,7 @@ class TestListeners:
         assert received  # the client keeps dispatching
 
     async def test_removed_event_listener_gets_nothing(
-        self, conn: MusicAssistantConnection, server: FakeMAServer
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
     ) -> None:
         await connected(conn, server)
         received: list[Any] = []
@@ -547,7 +563,7 @@ class TestListeners:
         assert received == []
 
     async def test_status_listeners_survive_a_failing_one_and_can_be_removed(
-        self, conn: MusicAssistantConnection, server: FakeMAServer
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
     ) -> None:
         def broken(status: ConnectionStatus) -> None:
             raise RuntimeError("status listener bug")
@@ -573,7 +589,7 @@ class TestListeners:
 
 class TestLifecycle:
     async def test_stop_is_idempotent_and_stops_reconnecting(
-        self, conn: MusicAssistantConnection, server: FakeMAServer
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
     ) -> None:
         await conn.stop()  # before start: nothing to do
         await connected(conn, server)
@@ -588,7 +604,7 @@ class TestLifecycle:
         assert len(server.created_clients) == attempts
 
     async def test_start_is_idempotent(
-        self, conn: MusicAssistantConnection, server: FakeMAServer
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
     ) -> None:
         await conn.start()
         await conn.start()
@@ -596,7 +612,7 @@ class TestLifecycle:
         assert len(server.created_clients) == 1
 
     async def test_start_after_stop_connects_again(
-        self, conn: MusicAssistantConnection, server: FakeMAServer
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
     ) -> None:
         await connected(conn, server)
         await conn.stop()
@@ -604,7 +620,7 @@ class TestLifecycle:
         assert len(server.clients) == 1
 
     async def test_reconnect_switches_address_and_token(
-        self, conn: MusicAssistantConnection, server: FakeMAServer
+        self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
     ) -> None:
         await connected(conn, server)
         old_client = server.clients[0]
@@ -623,8 +639,10 @@ class TestLifecycle:
 
 
 class TestLoginAndCreateToken:
-    async def test_returns_a_long_lived_token_that_connects(self, ma_login: FakeMAServer) -> None:
-        server = ma_login
+    async def test_returns_a_long_lived_token_that_connects(
+        self, login_server: FakeMusicAssistantServer
+    ) -> None:
+        server = login_server
 
         token, name = await login_and_create_token(server.url, "admin", "admin-password")
 
@@ -635,8 +653,10 @@ class TestLoginAndCreateToken:
         await connected(conn, server)
         await conn.stop()
 
-    async def test_the_temporary_session_token_is_revoked(self, ma_login: FakeMAServer) -> None:
-        server = ma_login
+    async def test_the_temporary_session_token_is_revoked(
+        self, login_server: FakeMusicAssistantServer
+    ) -> None:
+        server = login_server
         before = set(server.valid_tokens)
 
         token, _name = await login_and_create_token(server.url, "admin", "admin-password")
@@ -646,12 +666,12 @@ class TestLoginAndCreateToken:
         assert server.valid_tokens == before | {token}  # only the long-lived one is left
 
     async def test_never_logs_password_or_token(
-        self, ma_login: FakeMAServer, caplog: pytest.LogCaptureFixture
+        self, login_server: FakeMusicAssistantServer, caplog: pytest.LogCaptureFixture
     ) -> None:
         with caplog.at_level(logging.DEBUG):
-            token, _ = await login_and_create_token(ma_login.url, "admin", "admin-password")
+            token, _ = await login_and_create_token(login_server.url, "admin", "admin-password")
             with pytest.raises(LoginError) as err:
-                await login_and_create_token(ma_login.url, "admin", "hunter2-typo")
+                await login_and_create_token(login_server.url, "admin", "hunter2-typo")
         assert "admin-password" not in caplog.text
         assert "hunter2-typo" not in caplog.text and "hunter2-typo" not in str(err.value)
         assert token not in caplog.text

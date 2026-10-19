@@ -14,7 +14,7 @@ import pytest
 pytest.importorskip("music_assistant_models")
 pytest.importorskip("music_assistant_client")
 
-from music_assistant_models.enums import PlaybackState as MAState  # noqa: E402
+from music_assistant_models.enums import PlaybackState as MusicAssistantState  # noqa: E402
 
 from qobuz_proxy.backends.music_assistant.backend import MusicAssistantBackend  # noqa: E402
 from qobuz_proxy.backends.music_assistant.connection import ConnectionState  # noqa: E402
@@ -91,10 +91,10 @@ class TestTrackEnd:
         timing(IDLE_SETTLE_SECONDS=0.2)
         await rig.play_for("101", 30)
 
-        rig.server.device_reports(QID, MAState.IDLE)  # stream restart for a seek...
+        rig.server.device_reports(QID, MusicAssistantState.IDLE)  # stream restart for a seek...
         await rig.settle()
-        assert rig.queue().state == MAState.IDLE
-        rig.server.device_reports(QID, MAState.PLAYING)  # ...and it plays again
+        assert rig.queue().state == MusicAssistantState.IDLE
+        rig.server.device_reports(QID, MusicAssistantState.PLAYING)  # ...and it plays again
         await rig.idle(0.3)
 
         assert rig.cb.endings() == NOTHING_FIRED
@@ -110,9 +110,9 @@ class TestTrackEnd:
         await rig.backend.seek(120_000)
         await rig.settle()
 
-        rig.server.device_reports(QID, MAState.IDLE)
+        rig.server.device_reports(QID, MusicAssistantState.IDLE)
         await rig.settle()
-        rig.server.device_reports(QID, MAState.PLAYING)
+        rig.server.device_reports(QID, MusicAssistantState.PLAYING)
         await rig.idle(0.3)
 
         assert rig.cb.endings() == NOTHING_FIRED
@@ -127,7 +127,7 @@ class TestTrackEnd:
         rig.server.dead_player_ids.add(QID)
 
         await rig.play("101")
-        assert rig.queue().state == MAState.IDLE
+        assert rig.queue().state == MusicAssistantState.IDLE
         assert await rig.backend.get_state() == PlaybackState.PLAYING  # still starting
 
         await rig.wait(
@@ -206,7 +206,7 @@ class TestMAUserActions:
 
         assert rig.server.auto_stop_after_pause(QID)  # 30 s later MA stops the queue
         await rig.idle(0.2)
-        assert rig.ma_state() == MAState.IDLE
+        assert rig.queue_state() == MusicAssistantState.IDLE
         assert await rig.backend.get_state() == PlaybackState.PAUSED
 
         rig.server.ui_resume(QID)
@@ -226,7 +226,7 @@ class TestMAUserActions:
         await rig.idle(0.2)
         assert rig.cb.endings() == {**NOTHING_FIRED, "next_started": 1}
         rig.cb.position.assert_called_with(0)
-        assert rig.ma_track() == "102"
+        assert rig.queue_track() == "102"
 
     async def test_previous_in_ma_to_an_earlier_track_keeps_the_session(self, rig: Rig) -> None:
         await rig.play_for("101", 195)
@@ -239,9 +239,9 @@ class TestMAUserActions:
 
         await rig.wait(lambda: rig.cb.interrupted.called)
         await rig.idle(0.2)
-        assert rig.ma_track() == "101"
+        assert rig.queue_track() == "101"
         assert rig.cb.endings() == {**NOTHING_FIRED, "next_started": 1, "interrupted": 1}
-        assert rig.backend._external is False
+        assert rig.backend._has_external_playback is False
         assert await rig.backend.can_apply_remote_state() is True
 
     async def test_clearing_the_queue_in_ma_is_an_interruption(self, rig: Rig) -> None:
@@ -252,7 +252,7 @@ class TestMAUserActions:
         await rig.wait(lambda: rig.cb.interrupted.called)
         await rig.idle(0.2)
         assert rig.cb.endings() == {**NOTHING_FIRED, "interrupted": 1}
-        assert rig.backend._external is False
+        assert rig.backend._has_external_playback is False
 
     async def test_seek_in_ma_updates_the_position(self, rig: Rig) -> None:
         await rig.play_for("101", 10)
@@ -284,11 +284,11 @@ class TestMAUserActions:
 
 
 class TestTakeover:
-    async def test_foreign_content_releases_the_session_and_stops_writing(self, rig: Rig) -> None:
+    async def test_external_content_releases_the_session_and_stops_writing(self, rig: Rig) -> None:
         await rig.play_for("101", 30)
         assert await rig.arm("102")
 
-        rig.server.user_plays_foreign(QID, "Radio 1")
+        rig.server.user_plays_something_else(QID, "Radio 1")
 
         await rig.wait(lambda: rig.cb.external.await_count == 1, what="takeover")
         assert await rig.backend.check_external_playback() is True
@@ -299,7 +299,7 @@ class TestTakeover:
         # More MA activity, then whatever the Qobuz app or a replayed snapshot sends
         rig.server.ui_pause(QID)
         rig.server.ui_resume(QID)
-        rig.server.user_plays_foreign(QID, "Radio 2")
+        rig.server.user_plays_something_else(QID, "Radio 2")
         rig.server.set_player_volume(QID, 70)
         await rig.idle(0.1)
         with pytest.raises(RuntimeError):
@@ -320,7 +320,7 @@ class TestTakeover:
 
     async def test_reselection_lets_qobuz_play_again(self, rig: Rig) -> None:
         await rig.play_for("101", 30)
-        rig.server.user_plays_foreign(QID, "Radio 1")
+        rig.server.user_plays_something_else(QID, "Radio 1")
         await rig.wait(lambda: rig.cb.external.await_count == 1)
 
         rig.backend.prepare_for_selection()  # the user picks the device in the Qobuz app
@@ -328,7 +328,7 @@ class TestTakeover:
         assert await rig.backend.check_external_playback() is False
         assert await rig.backend.can_apply_remote_state() is True  # MA still plays the radio
         await rig.play("105")
-        assert rig.ma_track() == "105"
+        assert rig.queue_track() == "105"
         assert await rig.backend.get_state() == PlaybackState.PLAYING
         await rig.idle(0.2)
         assert rig.cb.external.await_count == 1
@@ -344,19 +344,19 @@ class TestTakeover:
     async def test_qobuz_played_from_mas_own_ui_is_a_takeover(self, rig: Rig) -> None:
         await rig.play_for("101", 30)
 
-        rig.server.user_plays_foreign(QID, track_ids=["555"])
+        rig.server.user_plays_something_else(QID, track_ids=["555"])
 
         await rig.wait(lambda: rig.cb.external.await_count == 1)
 
-    async def test_foreign_content_after_our_stop_is_just_forgotten(self, rig: Rig) -> None:
+    async def test_external_content_after_our_stop_is_just_forgotten(self, rig: Rig) -> None:
         await rig.play_for("101", 30)
         await rig.backend.stop()
 
-        rig.server.user_plays_foreign(QID, "Radio 1")
+        rig.server.user_plays_something_else(QID, "Radio 1")
         await rig.idle(0.2)
 
         assert rig.cb.endings() == NOTHING_FIRED
-        assert rig.backend._external is False
+        assert rig.backend._has_external_playback is False
         assert rig.backend._current is None
         assert await rig.backend.can_apply_remote_state() is True
 
@@ -369,7 +369,7 @@ class TestTakeover:
 
         rig.backend.on_external_playback(release)
         await rig.play_for("101", 30)
-        rig.server.user_plays_foreign(QID, "Radio 1")
+        rig.server.user_plays_something_else(QID, "Radio 1")
         await rig.settle()
         assert released == []  # the release is still running
 
@@ -378,7 +378,7 @@ class TestTakeover:
         assert released == ["released"]
 
     async def test_a_fresh_selection_may_take_a_busy_player(self, rig: Rig) -> None:
-        rig.server.user_plays_foreign(QID, "Radio 1")  # MA was already playing radio
+        rig.server.user_plays_something_else(QID, "Radio 1")  # MA was already playing radio
         await rig.settle()
 
         rig.backend.prepare_for_selection()
@@ -386,7 +386,7 @@ class TestTakeover:
         assert await rig.backend.check_external_playback() is False
         assert await rig.backend.can_apply_remote_state() is True
         await rig.play("101")
-        assert rig.ma_track() == "101"
+        assert rig.queue_track() == "101"
         await rig.idle(0.2)
         assert rig.cb.endings() == NOTHING_FIRED
 
@@ -548,7 +548,7 @@ class TestAddonRestart:
         after, cb = await self._restart_addon(rig, session)
 
         assert after._current is not None and after._current.track_id == "101"
-        assert after._attached is False
+        assert after._is_attached is False
         assert await after.get_state() == PlaybackState.STOPPED
         rig.server.ui_pause(QID)
         rig.server.ui_resume(QID)
@@ -597,7 +597,7 @@ class TestAddonRestart:
 
         assert len(rig.calls("player_queues/play_media")) == media_calls
         assert len(rig.calls("player_queues/play")) == 1
-        assert rig.ma_state() == MAState.PLAYING
+        assert rig.queue_state() == MusicAssistantState.PLAYING
 
     async def test_same_track_right_after_our_stop_restarts(self, rig: Rig) -> None:
         await rig.play_for("101", 50)
@@ -615,7 +615,7 @@ class TestAddonRestart:
         await rig.backend.stop()
         rig.server.ui_resume(QID)  # MA picks it up again at 0:50
         await rig.settle()
-        assert rig.ma_state() == MAState.PLAYING
+        assert rig.queue_state() == MusicAssistantState.PLAYING
 
         await rig.play("101")
 

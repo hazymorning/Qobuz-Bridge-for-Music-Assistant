@@ -44,28 +44,33 @@ def build_checks(qobuz: dict[str, Any], status: dict[str, Any]) -> list[dict[str
     state = connection["state"]
     connected = state == "connected"
     if connected:
-        ma = ("ok", f"Connected to Music Assistant {connection['server_version']}.")
+        music_assistant = ("ok", f"Connected to Music Assistant {connection['server_version']}.")
     elif state == "connecting":
-        ma = ("pending", "Connecting to Music Assistant…")
-    elif state == "auth_failed" or (state == "disconnected" and status["configured"]):
-        ma = ("error", connection["message"] or "Can't reach Music Assistant.")
+        music_assistant = ("pending", "Connecting to Music Assistant…")
+    elif state == "auth_failed" or (state == "disconnected" and status["is_configured"]):
+        music_assistant = ("error", connection["message"] or "Can't reach Music Assistant.")
     else:
-        ma = (
+        music_assistant = (
             "error",
             connection["message"]
             or "Not connected to Music Assistant yet. Enter your Music Assistant username and "
             "password below.",
         )
-    checks.append(("ma", ma[0], "Music Assistant", ma[1]))
+    checks.append(("music_assistant", music_assistant[0], "Music Assistant", music_assistant[1]))
 
-    if connected and connection["has_qobuz"]:
+    if connected and connection["has_qobuz_provider"]:
         checks.append(
-            ("ma_qobuz", "ok", "Qobuz in Music Assistant", "Qobuz is set up in Music Assistant.")
+            (
+                "qobuz_in_music_assistant",
+                "ok",
+                "Qobuz in Music Assistant",
+                "Qobuz is set up in Music Assistant.",
+            )
         )
     elif connected:
         checks.append(
             (
-                "ma_qobuz",
+                "qobuz_in_music_assistant",
                 "error",
                 "Qobuz in Music Assistant",
                 "Music Assistant has no working Qobuz provider. In Music Assistant open "
@@ -73,25 +78,25 @@ def build_checks(qobuz: dict[str, Any], status: dict[str, Any]) -> list[dict[str
             )
         )
 
-    count = status["exposed_count"]
-    ready = qobuz["logged_in"] and status["configured"]
+    count = status["speaker_count"]
+    ready = qobuz["logged_in"] and status["is_configured"]
     if count:
         noun = "speaker or group is" if count == 1 else "speakers and groups are"
-        exposed = ("ok", f"{count} {noun} available in the Qobuz app.")
-    elif ready and any(p["device_name"] for p in status["players"]):
-        exposed = ("pending", "Starting the Qobuz Connect devices…")
+        speakers = ("ok", f"{count} {noun} available in the Qobuz app.")
+    elif ready and any(p["speaker_name"] for p in status["players"]):
+        speakers = ("pending", "Starting the speakers…")
     elif ready and connected:
-        exposed = (
+        speakers = (
             "warn",
             "No speakers are shared with the Qobuz app. Turn on “All my Music Assistant "
             "players” or tick some below.",
         )
     else:
-        exposed = (
+        speakers = (
             "pending",
             "Speakers appear in the Qobuz app once Qobuz and Music Assistant are both connected.",
         )
-    checks.append(("exposed", exposed[0], "Speakers in the Qobuz app", exposed[1]))
+    checks.append(("speakers", speakers[0], "Speakers in the Qobuz app", speakers[1]))
     return [
         {"id": id_, "level": level, "title": title, "detail": detail}
         for id_, level, title, detail in checks
@@ -99,7 +104,7 @@ def build_checks(qobuz: dict[str, Any], status: dict[str, Any]) -> list[dict[str
 
 
 def _panel_status(request: web.Request) -> dict[str, Any]:
-    status: dict[str, Any] = request.app["ma_manager"].status()
+    status: dict[str, Any] = request.app["music_assistant"].status()
     auth = request.app["auth_state"]
     qobuz = {
         "logged_in": bool(auth["authenticated"]),
@@ -139,7 +144,7 @@ async def _handle_status(request: web.Request) -> web.Response:
 async def _handle_connect(request: web.Request) -> web.Response:
     body = await _read_body(request, {"url": str, "username": str, "password": str})
     try:
-        await request.app["ma_manager"].connect(
+        await request.app["music_assistant"].connect(
             body.get("url", ""), body.get("username", ""), body.get("password", "")
         )
     except LoginError as e:
@@ -148,7 +153,7 @@ async def _handle_connect(request: web.Request) -> web.Response:
 
 
 async def _handle_disconnect(request: web.Request) -> web.Response:
-    await request.app["ma_manager"].disconnect()
+    await request.app["music_assistant"].disconnect()
     return web.json_response(_panel_status(request))
 
 
@@ -157,12 +162,12 @@ async def _handle_players(request: web.Request) -> web.Response:
     selected = body.get("selected")
     if selected is not None and not all(isinstance(p, str) for p in selected):
         raise _bad_request("Invalid field: selected")
-    await request.app["ma_manager"].set_exposure(body.get("expose_all"), selected)
+    await request.app["music_assistant"].set_exposed_players(body.get("expose_all"), selected)
     return web.json_response(_panel_status(request))
 
 
-def register_ma_routes(app: web.Application) -> None:
-    app.router.add_get("/api/ma/status", _handle_status)
-    app.router.add_post("/api/ma/connect", _handle_connect)
-    app.router.add_post("/api/ma/disconnect", _handle_disconnect)
-    app.router.add_put("/api/ma/players", _handle_players)
+def register_music_assistant_routes(app: web.Application) -> None:
+    app.router.add_get("/api/music-assistant/status", _handle_status)
+    app.router.add_post("/api/music-assistant/connect", _handle_connect)
+    app.router.add_post("/api/music-assistant/disconnect", _handle_disconnect)
+    app.router.add_put("/api/music-assistant/players", _handle_players)

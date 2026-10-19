@@ -1,9 +1,9 @@
 """
-Expose Music Assistant players as Qobuz Connect devices.
+Qobuz Connect speakers for Music Assistant players.
 
 Runs the shared MA connection and one Speaker per exposed MA player or group.
-Each device's UUID comes from the MA player id and its discovery port is kept
-in the settings, so the Qobuz app sees the same devices after a restart, even
+Each speaker's UUID comes from the MA player id and its discovery port is kept
+in the settings, so the Qobuz app sees the same speakers after a restart, even
 before MA answers.
 
 Imports without the music-assistant extra (Python < 3.13); MA support then
@@ -29,18 +29,18 @@ logger = logging.getLogger(__name__)
 
 NAME_SUFFIX = " (MA)"
 FIRST_PORT = 8700  # clear of the main web port (8689) and config.yaml speakers (8690+)
-RECONCILE_DELAY_SECONDS = 1.0  # MA sends player events in bursts
-# MA re-registers players slowly after a restart; don't drop their devices for that.
+UPDATE_DELAY_SECONDS = 1.0  # MA sends player events in bursts
+# MA re-registers players slowly after a restart; don't drop their speakers for that.
 MISSING_PLAYER_GRACE_SECONDS = 1800.0
 START_RETRY_DELAYS_SECONDS = (10.0, 30.0, 60.0, 300.0)
 CONNECT_WAIT_SECONDS = 5.0
-RECONCILE_EVENTS = {"player_added", "player_removed", "player_updated", "player_config_updated"}
+PLAYER_EVENTS = {"player_added", "player_removed", "player_updated", "player_config_updated"}
 
 SpeakerFactory = Callable[[SpeakerConfig, AudioBackend], Any]
 
 
-def device_uuid(player_id: str) -> str:
-    """Qobuz Connect device UUID for an MA player; independent of names and hostname."""
+def speaker_uuid(player_id: str) -> str:
+    """Speaker UUID for an MA player; independent of names and hostname."""
     return str(uuid.uuid5(_SPEAKER_UUID_NAMESPACE, f"music_assistant:{player_id}"))
 
 
@@ -62,8 +62,8 @@ def port_is_free(bind_address: str, port: int) -> bool:
         return False
 
 
-class MusicAssistantManager:
-    """Runs the MA connection and one Speaker per exposed MA player."""
+class MusicAssistantSpeakers:
+    """Runs the MA connection and one speaker per exposed MA player."""
 
     def __init__(
         self,
@@ -80,17 +80,17 @@ class MusicAssistantManager:
         self._port_is_free = port_is_free
 
         self._settings = settings.Settings()
-        self._unsupported = ""  # why MA support is off, if it is
+        self._unsupported_reason = ""  # why MA support is off, if it is
         self._connection: Optional[Any] = None
-        self._qobuz_ready = False
+        self._is_qobuz_logged_in = False
         self._speakers: dict[str, Any] = {}
-        self._configs: dict[str, SpeakerConfig] = {}
-        self._retries: dict[str, asyncio.Task[None]] = {}
+        self._running_configs: dict[str, SpeakerConfig] = {}
+        self._retry_tasks: dict[str, asyncio.Task[None]] = {}
         self._missing_since: dict[str, float] = {}
         self._lock = asyncio.Lock()
-        self._reconcile_timer: Optional[asyncio.TimerHandle] = None
-        self._reconcile_task: Optional[asyncio.Task[None]] = None
-        self._exposed_names: list[str] = []
+        self._update_timer: Optional[asyncio.TimerHandle] = None
+        self._update_task: Optional[asyncio.Task[None]] = None
+        self._logged_speaker_names: list[str] = []
 
     @property
     def connection(self) -> Optional[Any]:
@@ -102,16 +102,16 @@ class MusicAssistantManager:
         try:
             from .connection import MusicAssistantConnection
         except ImportError as e:
-            self._unsupported = (
+            self._unsupported_reason = (
                 f"Music Assistant support is not installed (needs Python 3.13+): {e}"
             )
-            logger.warning(self._unsupported)
+            logger.warning(self._unsupported_reason)
             return
         extra = {"client_factory": self._client_factory} if self._client_factory else {}
         self._connection = MusicAssistantConnection(
             self._settings.url, self._settings.token, **extra
         )
-        self._connection.add_status_listener(lambda _status: self._schedule_reconcile())
+        self._connection.add_status_listener(lambda _status: self._update_speakers_soon())
         self._connection.add_event_listener(None, self._on_ma_event)
         if self._settings.is_configured:
             logger.info(f"Connecting to Music Assistant at {self._settings.url}")
@@ -120,26 +120,26 @@ class MusicAssistantManager:
         await self._connection.start()
 
     async def stop(self) -> None:
-        """Stop every MA device and the MA connection; MA itself keeps playing."""
-        if self._reconcile_timer is not None:
-            self._reconcile_timer.cancel()
-        if self._reconcile_task is not None:
-            self._reconcile_task.cancel()
+        """Stop every speaker and the MA connection; MA itself keeps playing."""
+        if self._update_timer is not None:
+            self._update_timer.cancel()
+        if self._update_task is not None:
+            self._update_task.cancel()
         await self._stop_all_speakers()
         if self._connection is not None:
             await self._connection.stop()
 
-    async def set_qobuz_ready(self, ready: bool, restart: bool = False) -> None:
-        """Start the devices once Qobuz is logged in, stop them on logout.
+    async def set_qobuz_logged_in(self, ready: bool, restart: bool = False) -> None:
+        """Start the speakers once Qobuz is logged in, stop them on logout.
 
         ``restart`` builds them again, e.g. after a new Qobuz login replaced
         the API client they use.
         """
-        self._qobuz_ready = ready
+        self._is_qobuz_logged_in = ready
         if not ready or restart:
             await self._stop_all_speakers()
         if ready:
-            await self.reconcile()
+            await self.update_speakers()
 
     async def connect(self, url: str, username: str, password: str) -> None:
         """Log in to MA, save the new token and reconnect.
@@ -148,7 +148,7 @@ class MusicAssistantManager:
             LoginError: with a message for the web UI.
         """
         if self._connection is None:
-            raise LoginError(self._unsupported)
+            raise LoginError(self._unsupported_reason)
         from .connection import login_and_create_token
 
         if not username.strip() or not password:
@@ -164,10 +164,10 @@ class MusicAssistantManager:
         logger.info(f"Music Assistant login saved for {url}")
         await self._connection.reconnect(url, token)
         await self._wait_until_connected()
-        await self.reconcile()
+        await self.update_speakers()
 
     async def disconnect(self) -> None:
-        """Forget the MA token and stop the MA devices; the player choice is kept."""
+        """Forget the MA token and stop the speakers; the player choice is kept."""
         logger.info("Disconnecting from Music Assistant (forgetting the saved login)")
         self._settings.token = ""
         self._save()
@@ -175,7 +175,7 @@ class MusicAssistantManager:
         if self._connection is not None:
             await self._connection.reconnect(self._settings.url, "")
 
-    async def set_exposure(
+    async def set_exposed_players(
         self, expose_all: Optional[bool] = None, selected: Optional[list[str]] = None
     ) -> None:
         """Change which MA players appear in the Qobuz app."""
@@ -192,21 +192,21 @@ class MusicAssistantManager:
                 else f"{len(self._settings.selected_player_ids)} selected"
             )
         )
-        await self.reconcile()
+        await self.update_speakers()
 
     def status(self) -> dict[str, Any]:
         """What the web UI shows; never the token."""
         conn = self._connection.status if self._connection is not None else None
         live = self._update_known_players()
-        wanted = self._wanted_configs() if self._settings.is_configured else {}
+        wanted = self._wanted_speakers() if self._settings.is_configured else {}
         known = self._settings.known_players
         return {
-            "configured": self._settings.is_configured,
+            "is_configured": self._settings.is_configured,
             "connection": {
                 "state": conn.state.value if conn else "not_configured",
-                "message": conn.message if conn else self._unsupported,
+                "message": conn.message if conn else self._unsupported_reason,
                 "server_version": conn.server_version if conn else "",
-                "has_qobuz": conn.has_qobuz if conn else False,
+                "has_qobuz_provider": conn.has_qobuz_provider if conn else False,
                 "url": self._settings.url or DEFAULT_URL,
                 "username": self._settings.username,
             },
@@ -219,21 +219,21 @@ class MusicAssistantManager:
                     "available": live.get(pid, False),
                     "hidden": p.hidden,
                     "selected": pid in self._settings.selected_player_ids,
-                    "device_name": wanted[pid].name if pid in wanted else "",
+                    "speaker_name": wanted[pid].name if pid in wanted else "",
                 }
                 for pid, p in sorted(known.items(), key=lambda kv: kv[1].name.lower())
             ],
-            "exposed_count": len(self._speakers),
+            "speaker_count": len(self._speakers),
         }
 
-    async def reconcile(self) -> None:
-        """Start, stop or restart devices so they match the MA players to expose."""
+    async def update_speakers(self) -> None:
+        """Start, stop or restart speakers so they match the MA players to expose."""
         async with self._lock:
             self._update_known_players()
-            ready = self._qobuz_ready and self._settings.is_configured and self._connection
-            wanted = self._wanted_configs() if ready else {}
+            ready = self._is_qobuz_logged_in and self._settings.is_configured and self._connection
+            wanted = self._wanted_speakers() if ready else {}
 
-            for pid, running in list(self._configs.items()):
+            for pid, running in list(self._running_configs.items()):
                 want = wanted.get(pid)
                 if want is not None and (want.name, want.http_port) == (
                     running.name,
@@ -241,41 +241,45 @@ class MusicAssistantManager:
                 ):
                     continue
                 if want is not None and self._is_playing(pid):
-                    continue  # a rename restarts the device: wait until it is idle
+                    continue  # a rename restarts the speaker: wait until it is idle
                 await self._stop_speaker(pid)
-            for pid in list(self._retries):
+            for pid in list(self._retry_tasks):
                 if pid not in wanted:
-                    self._retries.pop(pid).cancel()
+                    self._retry_tasks.pop(pid).cancel()
 
-            new = [pid for pid in wanted if pid not in self._speakers and pid not in self._retries]
+            new = [
+                pid for pid in wanted if pid not in self._speakers and pid not in self._retry_tasks
+            ]
             started = await asyncio.gather(*(self._start_speaker(pid, wanted[pid]) for pid in new))
             for pid, ok in zip(new, started):
                 if not ok:
-                    self._retries[pid] = asyncio.create_task(self._retry(pid, wanted[pid]))
+                    self._retry_tasks[pid] = asyncio.create_task(
+                        self._retry_start(pid, wanted[pid])
+                    )
 
             names = sorted(c.name for c in wanted.values())
-            if names != self._exposed_names:
-                self._exposed_names = names
+            if names != self._logged_speaker_names:
+                self._logged_speaker_names = names
                 logger.info(
                     f"Music Assistant players in the Qobuz app ({len(names)}): {', '.join(names)}"
                     if names
                     else "No Music Assistant players are in the Qobuz app"
                 )
 
-    def _schedule_reconcile(self) -> None:
+    def _update_speakers_soon(self) -> None:
         """Reconcile once soon; later events before then ride along."""
-        if self._reconcile_timer is not None:
+        if self._update_timer is not None:
             return
 
         def run() -> None:
-            self._reconcile_timer = None
-            self._reconcile_task = asyncio.create_task(self.reconcile())
+            self._update_timer = None
+            self._update_task = asyncio.create_task(self.update_speakers())
 
-        self._reconcile_timer = asyncio.get_running_loop().call_later(RECONCILE_DELAY_SECONDS, run)
+        self._update_timer = asyncio.get_running_loop().call_later(UPDATE_DELAY_SECONDS, run)
 
     def _on_ma_event(self, event: Any) -> None:
-        if event.event.value in RECONCILE_EVENTS:
-            self._schedule_reconcile()
+        if event.event.value in PLAYER_EVENTS:
+            self._update_speakers_soon()
 
     def _update_known_players(self) -> dict[str, bool]:
         """Bring the known players up to date with MA; returns live player ids -> available."""
@@ -311,8 +315,8 @@ class MusicAssistantManager:
             self._save()
         return {pid: p.available for pid, p in live.items()}
 
-    def _wanted_configs(self) -> dict[str, SpeakerConfig]:
-        """Device configs for the players to expose, with unique names."""
+    def _wanted_speakers(self) -> dict[str, SpeakerConfig]:
+        """Speaker configs for the players to expose, with unique names."""
         known = self._settings.known_players
         if self._settings.expose_all:
             exposed = [pid for pid, p in known.items() if not p.hidden]
@@ -328,7 +332,7 @@ class MusicAssistantManager:
             used.add(slugify_name(name))
             configs[pid] = SpeakerConfig(
                 name=name,
-                uuid=device_uuid(pid),
+                uuid=speaker_uuid(pid),
                 backend_type="music_assistant",
                 max_quality=27,  # MA streams with its own quality; this only checks availability
                 http_port=known[pid].http_port,
@@ -357,11 +361,11 @@ class MusicAssistantManager:
         if not await speaker.start():
             return False
         self._speakers[pid] = speaker
-        self._configs[pid] = config
+        self._running_configs[pid] = config
         return True
 
-    async def _retry(self, pid: str, config: SpeakerConfig) -> None:
-        """Keep trying to start a device that failed to start (e.g. its port was taken)."""
+    async def _retry_start(self, pid: str, config: SpeakerConfig) -> None:
+        """Keep trying to start a speaker that failed to start (e.g. its port was taken)."""
         try:
             for attempt in itertools.count():
                 delay = START_RETRY_DELAYS_SECONDS[
@@ -373,24 +377,24 @@ class MusicAssistantManager:
                     if await self._start_speaker(pid, config):
                         return
         finally:
-            if self._retries.get(pid) is asyncio.current_task():
-                del self._retries[pid]
+            if self._retry_tasks.get(pid) is asyncio.current_task():
+                del self._retry_tasks[pid]
 
     def _is_playing(self, pid: str) -> bool:
         return self._speakers[pid].get_status()["status"] in ("playing", "paused")
 
     async def _stop_speaker(self, pid: str) -> None:
-        self._configs.pop(pid)
+        self._running_configs.pop(pid)
         await self._speakers.pop(pid).stop()
 
     async def _stop_all_speakers(self) -> None:
         async with self._lock:
-            for task in self._retries.values():
+            for task in self._retry_tasks.values():
                 task.cancel()
-            self._retries.clear()
+            self._retry_tasks.clear()
             for pid in list(self._speakers):
                 await self._stop_speaker(pid)
-            self._exposed_names = []
+            self._logged_speaker_names = []
 
     def _save_session(self, pid: str, session: Optional[dict[str, Any]]) -> None:
         sessions = self._settings.sessions

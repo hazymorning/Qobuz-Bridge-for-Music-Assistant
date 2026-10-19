@@ -64,7 +64,7 @@ class ConnectionStatus:
     state: ConnectionState
     message: str = ""  # plain language, shown in the web UI
     server_version: str = ""
-    has_qobuz: bool = False  # MA has a working Qobuz provider
+    has_qobuz_provider: bool = False  # MA has a working Qobuz provider
 
 
 @dataclass(frozen=True)
@@ -82,7 +82,7 @@ class NotConnectedError(RuntimeError):
     """Music Assistant is not connected, or the connection dropped mid-call."""
 
 
-def _unreachable(url: str) -> str:
+def _unreachable_message(url: str) -> str:
     return f"Can't reach Music Assistant at {url}. Is the Music Assistant add-on running?"
 
 
@@ -129,7 +129,7 @@ class MusicAssistantConnection:
             self._set_status(ConnectionState.NOT_CONFIGURED)
             return
         self._set_status(ConnectionState.CONNECTING, "Connecting to Music Assistant…")
-        self._task = asyncio.create_task(self._run(), name="music-assistant-connection")
+        self._task = asyncio.create_task(self._keep_connected(), name="music-assistant-connection")
 
     async def stop(self) -> None:
         """Disconnect and stop reconnecting."""
@@ -200,33 +200,41 @@ class MusicAssistantConnection:
         """
         client = self._client
         if client is None:
-            logger.warning(f"MA ✗ {description}: not connected to Music Assistant")
+            logger.warning(
+                f"Music Assistant did not do {description}: not connected to Music Assistant"
+            )
             raise NotConnectedError("Music Assistant is not connected")
-        logger.info(f"MA → {description}")
+        logger.info(f"To Music Assistant: {description}")
         try:
             result = await asyncio.wait_for(command(client), timeout)
         except asyncio.TimeoutError:
-            logger.warning(f"MA ✗ {description}: no answer from Music Assistant in {timeout:.0f}s")
+            logger.warning(
+                f"Music Assistant did not do {description}: no answer from Music Assistant in {timeout:.0f}s"
+            )
             self._timeouts_in_a_row += 1
             stuck = self._timeouts_in_a_row >= 2 and self._client is client
             if stuck:
                 # Probably a dead socket the client has not noticed yet
                 logger.warning("Music Assistant stopped answering; reconnecting")
-                self._spawn(client.disconnect())
+                self._run_in_background(client.disconnect())
             raise NotConnectedError("Music Assistant did not answer in time") from None
         except asyncio.CancelledError:
             # The client cancels pending commands when its socket closes
             task = asyncio.current_task()
             if task is not None and task.cancelling() == 0:  # type: ignore[attr-defined]
-                logger.warning(f"MA ✗ {description}: connection to Music Assistant lost")
+                logger.warning(
+                    f"Music Assistant did not do {description}: connection to Music Assistant lost"
+                )
                 raise NotConnectedError("Lost the connection to Music Assistant") from None
             raise
         except (MusicAssistantClientException, aiohttp.ClientError, ConnectionError) as e:
-            logger.warning(f"MA ✗ {description}: connection to Music Assistant lost ({e})")
+            logger.warning(
+                f"Music Assistant did not do {description}: connection to Music Assistant lost ({e})"
+            )
             raise NotConnectedError("Lost the connection to Music Assistant") from e
         except MusicAssistantError as e:
             self._timeouts_in_a_row = 0
-            logger.warning(f"MA ✗ {description}: {type(e).__name__}: {e}")
+            logger.warning(f"Music Assistant did not do {description}: {type(e).__name__}: {e}")
             raise
         self._timeouts_in_a_row = 0
         return result
@@ -236,9 +244,9 @@ class MusicAssistantConnection:
         state: ConnectionState,
         message: str = "",
         server_version: str = "",
-        has_qobuz: bool = False,
+        has_qobuz_provider: bool = False,
     ) -> None:
-        status = ConnectionStatus(state, message, server_version, has_qobuz)
+        status = ConnectionStatus(state, message, server_version, has_qobuz_provider)
         if status == self._status:
             return
         self._status = status
@@ -259,12 +267,12 @@ class MusicAssistantConnection:
             except Exception:
                 logger.exception("Music Assistant event listener failed")
 
-    def _spawn(self, coro: Awaitable[Any]) -> None:
+    def _run_in_background(self, coro: Awaitable[Any]) -> None:
         task = asyncio.ensure_future(coro)
         self._background.add(task)
         task.add_done_callback(self._background.discard)
 
-    async def _run(self) -> None:
+    async def _keep_connected(self) -> None:
         """Connect, and reconnect with backoff, until stopped or the token is rejected."""
         attempt = 0
         while True:
@@ -272,7 +280,7 @@ class MusicAssistantConnection:
                 outcome = await self._connect_and_listen()
             except Exception:
                 logger.exception("Unexpected error in the Music Assistant connection")
-                self._set_status(ConnectionState.DISCONNECTED, _unreachable(self._url))
+                self._set_status(ConnectionState.DISCONNECTED, _unreachable_message(self._url))
                 outcome = False
             if outcome is None:
                 return
@@ -321,7 +329,7 @@ class MusicAssistantConnection:
                 MusicAssistantError,
             ) as e:
                 logger.warning(f"Can't reach Music Assistant at {self._url}: {e}")
-                self._set_status(ConnectionState.DISCONNECTED, _unreachable(self._url))
+                self._set_status(ConnectionState.DISCONNECTED, _unreachable_message(self._url))
                 return False
 
             client.subscribe(self._dispatch)
@@ -336,23 +344,23 @@ class MusicAssistantConnection:
             wait_loaded.cancel()
             if not loaded.is_set():
                 logger.warning("Music Assistant did not send its players and queues")
-                self._set_status(ConnectionState.DISCONNECTED, _unreachable(self._url))
+                self._set_status(ConnectionState.DISCONNECTED, _unreachable_message(self._url))
                 return False
 
             self._client = client
             self._timeouts_in_a_row = 0
             version = client.server_info.server_version
-            has_qobuz = any(p.domain == "qobuz" and p.available for p in client.providers)
+            has_qobuz_provider = any(p.domain == "qobuz" and p.available for p in client.providers)
             self._set_status(
                 ConnectionState.CONNECTED,
                 f"Connected to Music Assistant {version}.",
                 version,
-                has_qobuz,
+                has_qobuz_provider,
             )
             logger.info(
                 f"Connected to Music Assistant {version} at {self._url} "
                 f"({len(self.players())} players, "
-                f"{'Qobuz provider ready' if has_qobuz else 'no Qobuz provider'})"
+                f"{'Qobuz provider ready' if has_qobuz_provider else 'no Qobuz provider'})"
             )
             try:
                 await listen

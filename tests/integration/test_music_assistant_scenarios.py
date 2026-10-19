@@ -4,7 +4,7 @@ Real: the Speaker wiring (``Speaker.start`` and ``Speaker._setup_websocket``), t
 connection loop (authenticate, subscribe, join, receive), PlaybackCommandHandler, QueueHandler,
 VolumeCommandHandler, StateReporter, QobuzPlayer, QobuzQueue, the shared
 MusicAssistantConnection, MusicAssistantBackend and the real music-assistant-client talking to
-the in-memory FakeMAServer.
+the in-memory FakeMusicAssistantServer.
 
 Fake: the Qobuz Connect cloud socket (``QobuzCloud`` decodes every frame the renderer sends,
 which is exactly what the Qobuz app gets to see), the Qobuz track API (``StubMetadata``: URL and
@@ -28,7 +28,7 @@ pytest.importorskip("music_assistant_models")
 pytest.importorskip("music_assistant_client")
 
 import websockets  # noqa: E402
-from music_assistant_models.enums import PlaybackState as MAState  # noqa: E402
+from music_assistant_models.enums import PlaybackState as MusicAssistantState  # noqa: E402
 from music_assistant_models.enums import PlayerType  # noqa: E402
 
 from qobuz_proxy import speaker as speaker_module  # noqa: E402
@@ -40,7 +40,7 @@ from qobuz_proxy.backends.music_assistant.connection import (  # noqa: E402
     ConnectionState,
     MusicAssistantConnection,
 )
-from qobuz_proxy.backends.music_assistant.manager import device_uuid  # noqa: E402
+from qobuz_proxy.backends.music_assistant.speakers import speaker_uuid  # noqa: E402
 from qobuz_proxy.backends.types import PlaybackState  # noqa: E402
 from qobuz_proxy.config import SpeakerConfig  # noqa: E402
 from qobuz_proxy.connect.protocol import DecodedMessage, MessageType, ProtocolCodec  # noqa: E402
@@ -50,11 +50,11 @@ from qobuz_proxy.playback.metadata import TrackMetadata  # noqa: E402
 from qobuz_proxy.proto import qconnect_common_pb2 as common_pb  # noqa: E402
 from qobuz_proxy.proto import qconnect_payload_pb2 as pb  # noqa: E402
 from qobuz_proxy.speaker import Speaker  # noqa: E402
-from tests.backends.fake_music_assistant import FakeMAServer  # noqa: E402
+from tests.backends.fake_music_assistant import FakeMusicAssistantServer  # noqa: E402
 
 PID = "up1"
 ALBUM = ["101", "102", "103"]
-TRACK_S = 200  # FakeMAServer's default track length
+TRACK_S = 200  # FakeMusicAssistantServer's default track length
 
 # Wire playing states as the Qobuz app sees them
 APP_STOPPED, APP_PLAYING, APP_PAUSED = 1, 2, 3
@@ -215,15 +215,15 @@ class QobuzCloud:
                 self.volumes.append(msg.rndrSrvrVolumeChanged.volume)
 
     def _on_report(self, state: Any) -> None:
-        qid = state.currentQueueItemId
-        if not qid:
+        queue_id = state.currentQueueItemId
+        if not queue_id:
             return
-        self.current_qid = qid
-        if qid == self._answered_qid or self.deliver is None:
+        self.current_qid = queue_id
+        if queue_id == self._answered_qid or self.deliver is None:
             return
-        self._answered_qid = qid
-        if qid < len(self.album):
-            self.deliver(set_state(next_track=(self.album[qid], qid + 1)))
+        self._answered_qid = queue_id
+        if queue_id < len(self.album):
+            self.deliver(set_state(next_track=(self.album[queue_id], queue_id + 1)))
 
     def _on_next(self) -> None:
         index = self.current_qid  # queue item id n is album index n - 1
@@ -295,7 +295,7 @@ class Rig:
 
     def __init__(
         self,
-        server: FakeMAServer,
+        server: FakeMusicAssistantServer,
         monkeypatch: pytest.MonkeyPatch,
         *,
         player_id: str = PID,
@@ -340,7 +340,7 @@ class Rig:
         )
         config = SpeakerConfig(
             name=self.name,
-            uuid=device_uuid(self.player_id),
+            uuid=speaker_uuid(self.player_id),
             backend_type="music_assistant",
             max_quality=27,
             http_port=8700,
@@ -350,7 +350,7 @@ class Rig:
         return self
 
     def _save_session(self, session: Optional[dict[str, Any]]) -> None:
-        """Keep the backend's session like the manager does (per MA player id)."""
+        """Keep the backend's session like the music_assistant does (per MA player id)."""
         if session is None:
             self.sessions.pop(self.player_id, None)
         else:
@@ -436,7 +436,10 @@ class Rig:
         """The app plays the album from track ``index``; waits until MA plays it."""
         await self.deliver(album_state(index))
         await self.wait_for(
-            lambda: self.ma_track() == ALBUM[index] and self.ma_state() == MAState.PLAYING,
+            lambda: (
+                self.queue_track() == ALBUM[index]
+                and self.queue_state() == MusicAssistantState.PLAYING
+            ),
             f"MA playing {ALBUM[index]}",
         )
 
@@ -481,13 +484,13 @@ class Rig:
 
     # -- what Music Assistant does ---------------------------------------------
 
-    def ma_track(self) -> Optional[str]:
+    def queue_track(self) -> Optional[str]:
         queue = self.server.queue(self.player_id)
         if queue.current_index is None:
             return None
         return self.server.track_ids(self.player_id)[queue.current_index]
 
-    def ma_state(self) -> MAState:
+    def queue_state(self) -> MusicAssistantState:
         return self.server.queue(self.player_id).state
 
     def plays(self) -> list[tuple[str, list[str]]]:
@@ -526,8 +529,8 @@ def uri(track_id: str) -> str:
     return f"qobuz://track/{track_id}"
 
 
-def ma_server() -> FakeMAServer:
-    server = FakeMAServer()
+def make_server() -> FakeMusicAssistantServer:
+    server = FakeMusicAssistantServer()
     server.add_qobuz_provider()
     server.add_player(PID, "Kitchen")
     return server
@@ -540,12 +543,12 @@ def fast_heartbeat(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def server() -> FakeMAServer:
-    return ma_server()
+def server() -> FakeMusicAssistantServer:
+    return make_server()
 
 
 @pytest.fixture
-async def rig(server: FakeMAServer, monkeypatch: pytest.MonkeyPatch):
+async def rig(server: FakeMusicAssistantServer, monkeypatch: pytest.MonkeyPatch):
     rig = await Rig(server, monkeypatch).start()
     await rig.select()
     try:
@@ -576,7 +579,7 @@ class TestAlbumStart:
         assert rig.plays()[:2] == [("replace", [uri("101")]), ("replace_next", [uri("102")])]
         assert len(rig.plays()) == 2
         assert rig.server.track_ids(PID) == ["101", "102"]
-        assert rig.ma_track() == "101"
+        assert rig.queue_track() == "101"
         assert rig.app() == (APP_PLAYING, 1)
         assert rig.player.state == PlaybackState.PLAYING
         # Gapless: MA itself hands the next item to the speaker, the proxy sends no stop/play
@@ -596,12 +599,12 @@ class TestAlbumToTheEnd:
 
         await rig.finish_track()
         await rig.wait_for(lambda: rig.app() == (APP_PLAYING, 2), "app shows track 2")
-        assert rig.ma_track() == "102"
+        assert rig.queue_track() == "102"
         await rig.wait_armed("103")
 
         await rig.finish_track()
         await rig.wait_for(lambda: rig.app() == (APP_PLAYING, 3), "app shows track 3")
-        assert rig.ma_track() == "103"
+        assert rig.queue_track() == "103"
 
         await rig.finish_track()  # last track: the speaker goes idle
         assert rig.server.mark_ended(PID)
@@ -618,11 +621,13 @@ class TestAlbumToTheEnd:
         ]
         # The app followed every track once, in order (no repeat of the album)
         shown = [r.currentQueueItemId for r in rig.cloud.reports if r.currentQueueItemId]
-        assert [qid for i, qid in enumerate(shown) if i == 0 or shown[i - 1] != qid] == [1, 2, 3]
+        assert [
+            queue_id for i, queue_id in enumerate(shown) if i == 0 or shown[i - 1] != queue_id
+        ] == [1, 2, 3]
         assert not {"player_queues/stop", "player_queues/play_index", "player_queues/play"} & set(
             rig.writes()
         )
-        assert rig.ma_state() == MAState.IDLE
+        assert rig.queue_state() == MusicAssistantState.IDLE
 
 
 # =============================================================================
@@ -639,13 +644,13 @@ class TestAppCommands:
 
         # Pause (the app sends the position it shows: MA is already there, so no seek)
         await rig.deliver(album_state(0, APP_PAUSED, pos=30_000))
-        await rig.wait_for(lambda: rig.ma_state() == MAState.PAUSED, "MA paused")
+        await rig.wait_for(lambda: rig.queue_state() == MusicAssistantState.PAUSED, "MA paused")
         assert rig.writes() == ["player_queues/pause"]
         assert rig.app() == (APP_PAUSED, 1)
 
         rig.server.clear_logs()
         await rig.deliver(album_state(0, APP_PLAYING, pos=30_000))
-        await rig.wait_for(lambda: rig.ma_state() == MAState.PLAYING, "MA playing")
+        await rig.wait_for(lambda: rig.queue_state() == MusicAssistantState.PLAYING, "MA playing")
         assert rig.writes() == ["player_queues/play"]
         assert rig.app() == (APP_PLAYING, 1)
 
@@ -655,7 +660,7 @@ class TestAppCommands:
         await rig.idle(0.1)
         assert rig.server.calls("player_queues/seek") == [{"queue_id": PID, "position": 90}]
         assert rig.server.queue(PID).corrected_elapsed_time == pytest.approx(90, abs=1)
-        assert rig.ma_state() == MAState.PLAYING
+        assert rig.queue_state() == MusicAssistantState.PLAYING
         assert rig.app()[0] == APP_PLAYING
         assert rig.app_position() == pytest.approx(90_000, abs=1_500)
 
@@ -675,7 +680,7 @@ class TestAppCommands:
 
         await rig.deliver(album_state(1))  # "next" in the app
         await rig.wait_for(
-            lambda: rig.ma_track() == "102" and rig.app() == (APP_PLAYING, 2), "track 2"
+            lambda: rig.queue_track() == "102" and rig.app() == (APP_PLAYING, 2), "track 2"
         )
         jumps = rig.server.calls("player_queues/play_index")
         assert [(c["queue_id"], c["index"]) for c in jumps] == [(PID, queued)]
@@ -686,8 +691,8 @@ class TestAppCommands:
         await rig.deliver(album_state(0))  # "previous" in the app
         await rig.wait_for(
             lambda: (
-                rig.ma_track() == "101"
-                and rig.ma_state() == MAState.PLAYING
+                rig.queue_track() == "101"
+                and rig.queue_state() == MusicAssistantState.PLAYING
                 and rig.app() == (APP_PLAYING, 1)
             ),
             "track 1 again",
@@ -717,7 +722,7 @@ class TestMAUserInterface:
 
         rig.server.ui_next(PID)
         await rig.wait_for(lambda: rig.app() == (APP_PLAYING, 2), "app shows track 2")
-        assert rig.ma_track() == "102"
+        assert rig.queue_track() == "102"
         await rig.wait_armed("103")
 
         # The proxy followed MA and only queued the track after the new one
@@ -752,7 +757,7 @@ class TestMAUserInterface:
         await rig.idle(0.6)
 
         assert rig.server.writes == []  # no auto-advance into the next track
-        assert rig.ma_state() == MAState.IDLE and rig.ma_track() == "101"
+        assert rig.queue_state() == MusicAssistantState.IDLE and rig.queue_track() == "101"
         assert rig.player.current_track.track_id == "101"  # stopped, not finished
         assert rig.ws.is_renderer_active
 
@@ -770,7 +775,7 @@ class TestMAUserInterface:
         rig.server.advance_time(PID, TRACK_S - 31)
         rig.server.finish_current_track(PID)
         await rig.idle(0.2)
-        assert rig.ma_track() == "102"
+        assert rig.queue_track() == "102"
         rig.server.advance_time(PID, TRACK_S - 1)
         rig.server.finish_current_track(PID)
         rig.server.mark_ended(PID)
@@ -791,7 +796,7 @@ class TestMAUserInterface:
         await rig.wait_for(lambda: rig.app()[0] == APP_STOPPED, "app shows stopped")
         await rig.idle(0.6)
 
-        assert rig.ma_track() == "101" and rig.ma_state() == MAState.PLAYING
+        assert rig.queue_track() == "101" and rig.queue_state() == MusicAssistantState.PLAYING
         assert rig.server.writes == []  # no fight-back
         assert rig.ws.is_renderer_active  # still selected: play in the app works again
         assert not rig.ws._external_playback
@@ -807,7 +812,7 @@ async def take_over(rig: Rig) -> None:
     await rig.wait_armed("102")
     await rig.idle(0.2)  # past the start grace
     rig.server.clear_logs()
-    rig.server.user_plays_foreign(PID, "Jazz Radio")
+    rig.server.user_plays_something_else(PID, "Jazz Radio")
     await rig.wait_for(lambda: rig.ws._external_playback, "Qobuz session released")
 
 
@@ -821,7 +826,9 @@ class TestTakeoverInMA:
         assert rig.discovery is not None and rig.discovery.cleared == 1
         assert rig.server.writes == []
         queue = rig.server.queue(PID)
-        assert queue.current_item.name == "Jazz Radio" and queue.state == MAState.PLAYING
+        assert (
+            queue.current_item.name == "Jazz Radio" and queue.state == MusicAssistantState.PLAYING
+        )
 
     async def test_no_ma_writes_after_a_takeover_even_for_replayed_snapshots(self, rig):
         await take_over(rig)
@@ -844,7 +851,7 @@ class TestTakeoverInMA:
 
     async def test_selecting_the_device_again_takes_the_player_back(self, rig):
         await take_over(rig)
-        assert rig.server.queue(PID).state == MAState.PLAYING  # the radio still plays
+        assert rig.server.queue(PID).state == MusicAssistantState.PLAYING  # the radio still plays
 
         await rig.select()
         await rig.play_album(0)
@@ -872,7 +879,7 @@ class TestEndOfQueue:
 
         assert rig.server.writes == []
         assert rig.player.state == PlaybackState.STOPPED
-        assert rig.ma_state() == MAState.IDLE and rig.server.queue(PID).ended
+        assert rig.queue_state() == MusicAssistantState.IDLE and rig.server.queue(PID).ended
         assert rig.plays() == []
 
     async def test_repeat_and_autoplay_in_ma_are_turned_off_so_the_album_ends(self, server, rig):
@@ -887,7 +894,7 @@ class TestEndOfQueue:
         await rig.finish_track()
         await rig.wait_for(lambda: rig.app()[0] == APP_STOPPED, "app shows stopped")
         assert rig.server.track_ids(PID) == ["103"]
-        assert rig.ma_state() == MAState.IDLE
+        assert rig.queue_state() == MusicAssistantState.IDLE
 
 
 # =============================================================================
@@ -905,8 +912,8 @@ class TestUnavailableTracks:
         await rig.finish_track()
         await rig.wait_for(
             lambda: (
-                rig.ma_track() == "103"
-                and rig.ma_state() == MAState.PLAYING
+                rig.queue_track() == "103"
+                and rig.queue_state() == MusicAssistantState.PLAYING
                 and rig.app() == (APP_PLAYING, 3)
             ),
             "track 3 playing",
@@ -924,8 +931,8 @@ class TestUnavailableTracks:
         await rig.finish_track()
         await rig.wait_for(
             lambda: (
-                rig.ma_track() == "103"
-                and rig.ma_state() == MAState.PLAYING
+                rig.queue_track() == "103"
+                and rig.queue_state() == MusicAssistantState.PLAYING
                 and rig.app() == (APP_PLAYING, 3)
             ),
             "track 3 playing",
@@ -942,8 +949,8 @@ class TestUnavailableTracks:
 
 
 @pytest.fixture
-def group_server() -> FakeMAServer:
-    server = FakeMAServer()
+def group_server() -> FakeMusicAssistantServer:
+    server = FakeMusicAssistantServer()
     server.add_qobuz_provider()
     server.add_player("m1", "Kitchen", volume=20)
     server.add_player("m2", "Living room", volume=40)
@@ -1013,8 +1020,8 @@ class TestMARestart:
         await rig.deliver(album_state(0, APP_PLAYING, pos=30_000))  # play where it stopped
         await rig.wait_for(
             lambda: (
-                rig.ma_track() == "101"
-                and rig.ma_state() == MAState.PLAYING
+                rig.queue_track() == "101"
+                and rig.queue_state() == MusicAssistantState.PLAYING
                 and rig.app() == (APP_PLAYING, 1)
             ),
             "playing again",
@@ -1079,7 +1086,7 @@ class TestAddonRestart:
         await first.close()  # the add-on stops; MA keeps playing
 
         assert "player_queues/stop" not in first.writes()
-        assert server.queue(PID).state == MAState.PLAYING
+        assert server.queue(PID).state == MusicAssistantState.PLAYING
         items_before = server.item_ids(PID)
         # A new process reads the remembered session from the settings file
         path = tmp_path / "music_assistant.json"
@@ -1115,13 +1122,13 @@ class TestAddonRestart:
                 "player_queues/clear",
             } & set(second.writes())
             assert server.queue(PID).corrected_elapsed_time >= 60
-            assert second.ma_track() == "101"
-            assert server.queue(PID).state == MAState.PLAYING
+            assert second.queue_track() == "101"
+            assert server.queue(PID).state == MusicAssistantState.PLAYING
 
             # The album goes on with the next track
             await second.finish_track()
             await second.wait_for(lambda: second.app() == (APP_PLAYING, 2), "app shows track 2")
-            assert second.ma_track() == "102"
+            assert second.queue_track() == "102"
         finally:
             await second.close()
 
@@ -1151,7 +1158,7 @@ class TestSwitchQobuzDevice:
         rig.server.clear_logs()
 
         await rig.deliver(set_active(False))
-        await rig.wait_for(lambda: rig.ma_state() == MAState.IDLE, "MA stopped")
+        await rig.wait_for(lambda: rig.queue_state() == MusicAssistantState.IDLE, "MA stopped")
         assert rig.writes() == ["player_queues/stop"]
 
         # The session goes on with the other device
@@ -1165,8 +1172,8 @@ class TestSwitchQobuzDevice:
         await rig.deliver(set_active(True), album_state(0, APP_PLAYING, pos=0))
         await rig.wait_for(
             lambda: (
-                rig.ma_track() == "101"
-                and rig.ma_state() == MAState.PLAYING
+                rig.queue_track() == "101"
+                and rig.queue_state() == MusicAssistantState.PLAYING
                 and rig.app() == (APP_PLAYING, 1)
             ),
             "playing here again",

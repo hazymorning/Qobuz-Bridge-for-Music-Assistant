@@ -22,11 +22,11 @@ import pytest
 from qobuz_proxy.backends.types import BackendTrackMetadata, PlaybackState
 
 if TYPE_CHECKING:
-    from music_assistant_models.enums import PlaybackState as MAState
+    from music_assistant_models.enums import PlaybackState as MusicAssistantState
 
     from qobuz_proxy.backends.music_assistant.backend import MusicAssistantBackend
     from qobuz_proxy.backends.music_assistant.connection import MusicAssistantConnection
-    from tests.backends.fake_music_assistant import FakeMAServer
+    from tests.backends.fake_music_assistant import FakeMusicAssistantServer
 
 QID = "up1"
 NAME = "Kitchen (MA)"
@@ -96,7 +96,7 @@ class Callbacks:
 class Rig:
     """Fake MA server + real connection + one backend with mocked Player callbacks."""
 
-    def __init__(self, server: FakeMAServer) -> None:
+    def __init__(self, server: FakeMusicAssistantServer) -> None:
         self.server = server
         self.connections: list[MusicAssistantConnection] = []
         self.backends: list[MusicAssistantBackend] = []
@@ -206,14 +206,14 @@ class Rig:
     def queue(self) -> Any:
         return self.server.queue(QID)
 
-    def ma_state(self) -> MAState:
+    def queue_state(self) -> MusicAssistantState:
         return self.server.queue(QID).state
 
-    def ma_track(self) -> Optional[str]:
+    def queue_track(self) -> Optional[str]:
         item = self.server.queue(QID).current_item
         return item.media_item.item_id if item is not None and item.media_item else None
 
-    def ma_item_id(self, index: int) -> str:
+    def item_id_at(self, index: int) -> str:
         return self.server.item_ids(QID)[index]
 
     def calls(self, command: str) -> list[dict[str, Any]]:
@@ -241,9 +241,9 @@ def timing(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
 @pytest.fixture
 async def rig(timing: Callable[..., None]) -> AsyncIterator[Rig]:
     """A rig whose connection is up and whose backend is connected."""
-    from tests.backends.fake_music_assistant import FakeMAServer
+    from tests.backends.fake_music_assistant import FakeMusicAssistantServer
 
-    server = FakeMAServer()
+    server = FakeMusicAssistantServer()
     server.add_qobuz_provider()
     server.add_player(QID, "Kitchen")
     r = Rig(server)

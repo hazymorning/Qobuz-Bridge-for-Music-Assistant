@@ -1,4 +1,4 @@
-"""Music Assistant backend: Qobuz Connect devices that play through Music Assistant."""
+"""Music Assistant backend: Qobuz Connect speakers that play through Music Assistant (MA)."""
 
 
 class LoginError(Exception):

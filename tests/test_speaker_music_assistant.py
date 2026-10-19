@@ -29,7 +29,7 @@ def _speaker(backend_type: str, active: bool) -> tuple[Speaker, AsyncMock]:
     ("backend_type", "active", "applied"),
     [
         ("music_assistant", True, True),
-        ("music_assistant", False, False),  # another device's volume broadcast
+        ("music_assistant", False, False),  # another speaker's volume broadcast
         ("dlna", False, True),  # upstream behaviour unchanged
     ],
 )

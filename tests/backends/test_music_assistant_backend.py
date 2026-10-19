@@ -11,7 +11,7 @@ import pytest
 pytest.importorskip("music_assistant_models")
 pytest.importorskip("music_assistant_client")
 
-from music_assistant_models.enums import PlaybackState as MAState  # noqa: E402
+from music_assistant_models.enums import PlaybackState as MusicAssistantState  # noqa: E402
 from music_assistant_models.enums import PlayerType, RepeatMode  # noqa: E402
 from music_assistant_models.errors import (  # noqa: E402
     InvalidCommand,
@@ -41,7 +41,7 @@ class TestBasics:
         await rig.backend.disconnect()
         await rig.backend.disconnect()  # idempotent
         await rig.settle()
-        assert rig.ma_state() == MAState.PLAYING
+        assert rig.queue_state() == MusicAssistantState.PLAYING
         assert rig.calls("player_queues/stop") == []
         assert not rig.backend.is_connected()
 
@@ -82,11 +82,11 @@ class TestPlay:
         assert call["media"] == "qobuz://track/101"
         assert call["option"] == "replace"
         assert rig.server.track_ids(QID) == ["101"]
-        assert rig.ma_state() == MAState.PLAYING
+        assert rig.queue_state() == MusicAssistantState.PLAYING
         assert rig.backend._current is not None
-        assert rig.backend._current.item_id == rig.ma_item_id(0)
+        assert rig.backend._current.item_id == rig.item_id_at(0)
         assert rig.backend._current.track_id == "101"
-        assert rig.backend._attached is True
+        assert rig.backend._is_attached is True
         assert await rig.backend.get_state() == PlaybackState.PLAYING
         rig.cb.state.assert_called_with(PlaybackState.PLAYING)
         assert rig.calls("player_queues/clear") == []
@@ -102,7 +102,7 @@ class TestPlay:
         ]
         assert rig.calls("player_queues/play_media")[0]["option"] == "add"
         (jump,) = rig.calls("player_queues/play_index")
-        assert jump["index"] == rig.ma_item_id(0)
+        assert jump["index"] == rig.item_id_at(0)
         assert jump["seek_position"] == 65
         assert rig.queue().corrected_elapsed_time == pytest.approx(65, abs=1)
         assert await rig.backend.get_position() == pytest.approx(65_000, abs=1_000)
@@ -182,7 +182,7 @@ class TestPlay:
 
         await rig.play("102")
 
-        assert rig.ma_track() == "102"
+        assert rig.queue_track() == "102"
         assert await rig.backend.get_state() == PlaybackState.PLAYING
 
 
@@ -196,14 +196,14 @@ class TestPauseResume:
         await rig.backend.pause()
         await rig.settle()
         assert [c["queue_id"] for c in rig.calls("player_queues/pause")] == [QID]
-        assert rig.ma_state() == MAState.PAUSED
+        assert rig.queue_state() == MusicAssistantState.PAUSED
         assert await rig.backend.get_state() == PlaybackState.PAUSED
         rig.cb.state.assert_called_with(PlaybackState.PAUSED)
 
         assert await rig.backend.resume() is True
         await rig.settle()
         assert len(rig.calls("player_queues/play")) == 1
-        assert rig.ma_state() == MAState.PLAYING
+        assert rig.queue_state() == MusicAssistantState.PLAYING
         assert await rig.backend.get_state() == PlaybackState.PLAYING
         assert rig.cb.endings() == NOTHING_FIRED
 
@@ -212,7 +212,7 @@ class TestPauseResume:
         await rig.backend.pause()
         assert rig.server.auto_stop_after_pause(QID)  # MA stops a queue paused for 30 s
         await rig.settle()
-        assert rig.ma_state() == MAState.IDLE
+        assert rig.queue_state() == MusicAssistantState.IDLE
         assert await rig.backend.get_state() == PlaybackState.PAUSED
 
         assert await rig.backend.resume() is True
@@ -220,7 +220,7 @@ class TestPauseResume:
 
         assert len(rig.calls("player_queues/play")) == 1
         assert rig.calls("player_queues/play_media")[-1]["option"] == "replace"  # no re-play
-        assert rig.ma_state() == MAState.PLAYING
+        assert rig.queue_state() == MusicAssistantState.PLAYING
         assert rig.queue().corrected_elapsed_time == pytest.approx(40, abs=1)
         assert await rig.backend.get_state() == PlaybackState.PLAYING
         assert rig.cb.endings() == NOTHING_FIRED
@@ -238,7 +238,7 @@ class TestPauseResume:
         await rig.settle()
 
         assert len(rig.calls("player_queues/play")) == 1
-        assert rig.ma_track() == "101" and rig.ma_state() == MAState.PLAYING
+        assert rig.queue_track() == "101" and rig.queue_state() == MusicAssistantState.PLAYING
         assert rig.queue().corrected_elapsed_time == pytest.approx(40, abs=1)
         assert rig.cb.endings() == NOTHING_FIRED
 
@@ -255,8 +255,8 @@ class TestPauseResume:
         assert await rig.backend.resume() is True
         await rig.settle()
 
-        assert rig.ma_track() == "101"
-        assert rig.ma_state() == MAState.PLAYING
+        assert rig.queue_track() == "101"
+        assert rig.queue_state() == MusicAssistantState.PLAYING
         assert rig.calls("player_queues/play_index")[-1]["seek_position"] == 40
         assert rig.queue().corrected_elapsed_time == pytest.approx(40, abs=1)
         assert await rig.backend.get_state() == PlaybackState.PLAYING
@@ -277,7 +277,7 @@ class TestStop:
         await rig.settle()
 
         assert [c["queue_id"] for c in rig.calls("player_queues/stop")] == [QID]
-        assert rig.ma_state() == MAState.IDLE
+        assert rig.queue_state() == MusicAssistantState.IDLE
         assert await rig.backend.get_state() == PlaybackState.STOPPED
         rig.cb.state.assert_called_with(PlaybackState.STOPPED)
         await rig.idle(0.2)
@@ -302,19 +302,19 @@ class TestStop:
 
     async def test_stop_sends_nothing_while_ma_plays_something_else(self, rig: Rig) -> None:
         # e.g. the speaker's own Qobuz Connect (or MA) is playing; we never played here
-        rig.server.user_plays_foreign(QID, "Radio 1")
+        rig.server.user_plays_something_else(QID, "Radio 1")
         await rig.settle()
         await rig.backend.stop()
         await rig.settle()
         assert rig.server.writes == []
-        assert rig.ma_state() == MAState.PLAYING
+        assert rig.queue_state() == MusicAssistantState.PLAYING
 
     async def test_stop_for_the_armed_next_track_sends_nothing_and_play_jumps(
         self, rig: Rig
     ) -> None:
         await rig.play("101")
         assert await rig.arm("102", queue_item_id=7)
-        armed_item = rig.ma_item_id(1)
+        armed_item = rig.item_id_at(1)
         writes = list(rig.server.writes)
 
         await rig.backend.stop(next_track_id="102")
@@ -328,7 +328,7 @@ class TestStop:
         assert jump["index"] == armed_item
         assert jump["seek_position"] == 0
         assert len(rig.calls("player_queues/play_media")) == 2  # REPLACE + REPLACE_NEXT only
-        assert rig.ma_track() == "102"
+        assert rig.queue_track() == "102"
         assert rig.backend._current is not None and rig.backend._current.item_id == armed_item
         assert await rig.backend.get_state() == PlaybackState.PLAYING
         await rig.idle(0.1)  # past JUMP_WAIT: no deferred stop
@@ -352,7 +352,7 @@ class TestStop:
         await rig.backend.stop(next_track_id="102")  # ...but no play() follows
         await rig.wait(lambda: len(rig.calls("player_queues/stop")) == 1, what="deferred stop")
 
-        assert rig.ma_state() == MAState.IDLE
+        assert rig.queue_state() == MusicAssistantState.IDLE
         assert rig.cb.endings() == NOTHING_FIRED
 
     async def test_stop_for_another_track_stops_ma_at_once(self, rig: Rig) -> None:
@@ -586,7 +586,7 @@ class TestGapless:
         armed = rig.backend._armed
         assert armed is not None
         assert (armed.item_id, armed.track_id, armed.qobuz_queue_item_id) == (
-            rig.ma_item_id(1),
+            rig.item_id_at(1),
             "102",
             7,
         )
@@ -698,7 +698,7 @@ class TestGapless:
 
         assert rig.calls("player_queues/play_media") == []
         armed = rig.backend._armed
-        assert armed is not None and armed.item_id == rig.ma_item_id(1)
+        assert armed is not None and armed.item_id == rig.item_id_at(1)
         rig.server.finish_current_track(QID)
         await rig.wait(lambda: rig.cb.next_started.called)
         assert rig.cb.endings() == {**NOTHING_FIRED, "next_started": 1}
@@ -706,7 +706,7 @@ class TestGapless:
     async def test_clear_next_track_deletes_the_armed_item(self, rig: Rig) -> None:
         await rig.play("101")
         assert await rig.arm("102")
-        item = rig.ma_item_id(1)
+        item = rig.item_id_at(1)
 
         await rig.backend.clear_next_track()
         await rig.settle()
@@ -735,11 +735,11 @@ class TestGapless:
         assert rig.server.track_ids(QID) == ["101", "102"]  # MA ignored the delete
         assert await rig.arm("103")
         assert rig.server.track_ids(QID) == ["101", "102", "103"]
-        new_next = rig.ma_item_id(2)
+        new_next = rig.item_id_at(2)
 
         rig.server.finish_current_track(QID)  # MA moves on to the outdated 102...
 
-        await rig.wait(lambda: rig.ma_track() == "103", what="jump to the new next")
+        await rig.wait(lambda: rig.queue_track() == "103", what="jump to the new next")
         assert rig.calls("player_queues/play_index")[-1]["index"] == new_next
         await rig.wait(lambda: rig.cb.next_started.called)
         await rig.idle(0.1)
@@ -758,7 +758,7 @@ class TestGapless:
         await rig.wait(lambda: rig.cb.track_ended.called, what="track_ended")
         await rig.idle(0.1)
         assert len(rig.calls("player_queues/stop")) == 1
-        assert rig.ma_state() == MAState.IDLE
+        assert rig.queue_state() == MusicAssistantState.IDLE
         assert rig.cb.endings() == {**NOTHING_FIRED, "track_ended": 1}
 
     async def test_clear_right_after_the_transition_keeps_the_new_track(self, rig: Rig) -> None:
@@ -771,6 +771,6 @@ class TestGapless:
         await rig.settle()
 
         assert rig.calls("player_queues/delete_item") == []
-        assert rig.ma_track() == "102" and rig.ma_state() == MAState.PLAYING
+        assert rig.queue_track() == "102" and rig.queue_state() == MusicAssistantState.PLAYING
         assert rig.backend._current is not None and rig.backend._current.track_id == "102"
         assert await rig.backend.get_state() == PlaybackState.PLAYING
