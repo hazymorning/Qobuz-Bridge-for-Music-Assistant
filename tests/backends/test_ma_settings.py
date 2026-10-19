@@ -5,6 +5,7 @@ import logging
 import os
 import stat
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -171,7 +172,11 @@ class TestSettingsStore:
 class TestFromDict:
     def test_known_players_hidden_flag_defaults_to_false(self) -> None:
         loaded = MASettings.from_dict(
-            {"known_players": {"up1": {"name": "Kitchen", "player_type": "player", "http_port": 8700}}}
+            {
+                "known_players": {
+                    "up1": {"name": "Kitchen", "player_type": "player", "http_port": 8700}
+                }
+            }
         )
         assert loaded.known_players == {"up1": KnownPlayer("up1", "Kitchen", "player", 8700)}
         assert loaded.known_players["up1"].hidden is False
@@ -282,9 +287,9 @@ class TestSessionStore:
         writes: list[str] = []
         real_mkstemp = settings.tempfile.mkstemp
 
-        def counting_mkstemp(*args: object, **kwargs: object) -> tuple[int, str]:
+        def counting_mkstemp(*args: Any, **kwargs: Any) -> Any:
             writes.append("w")
-            return real_mkstemp(*args, **kwargs)  # type: ignore[arg-type]
+            return real_mkstemp(*args, **kwargs)
 
         monkeypatch.setattr(settings.tempfile, "mkstemp", counting_mkstemp)
         store.put("up1", {"current": {"item_id": "qi1"}})

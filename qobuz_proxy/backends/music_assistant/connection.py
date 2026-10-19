@@ -147,6 +147,7 @@ class MusicAssistantConnection:
         self._event_listeners: dict[Optional[str], list[EventListener]] = {}
         self._state_listeners: list[Callable[[MAConnectionStatus], None]] = []
         self._timeouts = 0  # consecutive command timeouts
+        self._was_connected = False  # the last attempt got as far as CONNECTED
 
     # ------------------------------------------------------------------
     # Properties
@@ -182,6 +183,8 @@ class MusicAssistantConnection:
                 MAConnectionState.NOT_CONFIGURED, "Not connected to Music Assistant yet."
             )
             return
+        # Connecting from now on, so callers waiting for the result don't stop early
+        self._set_state(MAConnectionState.CONNECTING, "Connecting to Music Assistant…")
         self._task = asyncio.create_task(self._run(), name="music-assistant-connection")
 
     async def stop(self) -> None:
@@ -339,6 +342,8 @@ class MusicAssistantConnection:
         qobuz_provider: Optional[bool] = None,
     ) -> None:
         changed = state != self._status.state
+        if not changed and message == self._status.message and server_version is None:
+            return  # nothing new to tell the listeners
         self._status = MAConnectionStatus(
             state=state,
             url=self._url,
@@ -389,13 +394,14 @@ class MusicAssistantConnection:
         """Connect, listen, and reconnect until stopped or the token is rejected."""
         attempt = 0
         while True:
+            self._was_connected = False
             retry = await self._connect_once()
             if not retry:
                 return
+            if self._was_connected:
+                attempt = 0  # a working connection dropped (e.g. MA restarted): retry soon
             delay = self._backoff_delay(attempt)
             attempt += 1
-            if self._status.state == MAConnectionState.CONNECTED:
-                attempt = 0
             logger.info(f"Reconnecting to Music Assistant in {delay:.0f}s")
             await asyncio.sleep(delay)
 
@@ -464,6 +470,7 @@ class MusicAssistantConnection:
 
             self._client = client
             self._timeouts = 0
+            self._was_connected = True
             server_info = getattr(client, "server_info", None)
             version = str(getattr(server_info, "server_version", "") or "")
             qobuz = self._qobuz_provider_available(client)
