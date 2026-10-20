@@ -8,8 +8,33 @@ import socket
 from typing import Any
 
 from aiohttp import web
+from aiohttp.typedefs import Handler
 
 from qobuz_proxy.backends.music_assistant import LoginError
+
+
+MAX_FIELD_LENGTH = 1000  # characters in a text field, entries in a list
+
+
+@web.middleware
+async def guard_requests(request: web.Request, handler: Handler) -> web.StreamResponse:
+    """Refuse cross-site writes, and keep other sites from framing the panel.
+
+    The API is open on the LAN, so a web page in the user's browser could post to
+    it. Browsers mark such requests with Sec-Fetch-Site, and an HTML form can only
+    post, never as JSON; a script that tries needs a CORS preflight, which is never
+    granted.
+    """
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        if request.headers.get("Sec-Fetch-Site", "same-origin") != "same-origin":
+            raise web.HTTPForbidden(text="Cross-site requests are not allowed")
+        if request.method == "POST" and request.content_type != "application/json":
+            raise web.HTTPUnsupportedMediaType(text="Send JSON")
+    response = await handler(request)
+    response.headers.setdefault(
+        "Content-Security-Policy", "default-src 'self'; frame-ancestors 'self'"
+    )
+    return response
 
 
 def _lan_ip() -> str:
@@ -120,7 +145,7 @@ def _panel_status(request: web.Request) -> dict[str, Any]:
 
 
 async def _read_body(request: web.Request, fields: dict[str, type]) -> dict[str, Any]:
-    """The JSON object body, with only known fields of the right type."""
+    """The JSON object body, with only known fields of the right type and size."""
     try:
         body = await request.json()
     except ValueError:
@@ -128,7 +153,11 @@ async def _read_body(request: web.Request, fields: dict[str, type]) -> dict[str,
     if not isinstance(body, dict):
         raise _bad_request("Invalid request.")
     for key, value in body.items():
-        if key not in fields or not isinstance(value, fields[key]):
+        if (
+            key not in fields
+            or not isinstance(value, fields[key])
+            or (isinstance(value, (str, list)) and len(value) > MAX_FIELD_LENGTH)
+        ):
             raise _bad_request(f"Invalid field: {key}"[:100])
     return body
 
@@ -167,6 +196,7 @@ async def _handle_players(request: web.Request) -> web.Response:
 
 
 def register_music_assistant_routes(app: web.Application) -> None:
+    app.middlewares.append(guard_requests)
     app.router.add_get("/api/music-assistant/status", _handle_status)
     app.router.add_post("/api/music-assistant/connect", _handle_connect)
     app.router.add_post("/api/music-assistant/disconnect", _handle_disconnect)

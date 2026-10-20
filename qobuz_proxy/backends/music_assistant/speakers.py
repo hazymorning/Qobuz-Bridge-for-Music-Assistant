@@ -88,6 +88,7 @@ class MusicAssistantSpeakers:
         self._retry_tasks: dict[str, asyncio.Task[None]] = {}
         self._missing_since: dict[str, float] = {}
         self._lock = asyncio.Lock()
+        self._login_lock = asyncio.Lock()
         self._update_timer: Optional[asyncio.TimerHandle] = None
         self._update_task: Optional[asyncio.Task[None]] = None
         self._logged_speaker_names: list[str] = []
@@ -154,26 +155,28 @@ class MusicAssistantSpeakers:
         if not username.strip() or not password:
             raise LoginError("Enter your Music Assistant username and password.")
         url = normalize_url(url) or DEFAULT_URL
-        try:
-            token, name = await login_and_create_token(url, username.strip(), password)
-        except LoginError as e:
-            logger.warning(f"Music Assistant login failed: {e}")
-            raise
-        self._settings.url, self._settings.token, self._settings.username = url, token, name
-        self._save()
-        logger.info(f"Music Assistant login saved for {url}")
-        await self._connection.reconnect(url, token)
+        async with self._login_lock:
+            try:
+                token, name = await login_and_create_token(url, username.strip(), password)
+            except LoginError as e:
+                logger.warning(f"Music Assistant login failed: {e}")
+                raise
+            self._settings.url, self._settings.token, self._settings.username = url, token, name
+            self._save()
+            logger.info(f"Music Assistant login saved for {url}")
+            await self._connection.reconnect(url, token)
         await self._wait_until_connected()
         await self.update_speakers()
 
     async def disconnect(self) -> None:
         """Forget the MA token and stop the speakers; the player choice is kept."""
         logger.info("Disconnecting from Music Assistant (forgetting the saved login)")
-        self._settings.token = ""
-        self._save()
-        await self._stop_all_speakers()
-        if self._connection is not None:
-            await self._connection.reconnect(self._settings.url, "")
+        async with self._login_lock:
+            self._settings.token = ""
+            self._save()
+            await self._stop_all_speakers()
+            if self._connection is not None:
+                await self._connection.reconnect(self._settings.url, "")
 
     async def set_exposed_players(
         self, expose_all: Optional[bool] = None, selected: Optional[list[str]] = None

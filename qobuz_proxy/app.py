@@ -31,6 +31,7 @@ from qobuz_proxy.config import (
     SpeakerConfig,
     _assign_ports,
     _generate_uuids,
+    _validate_speakers,
     parse_device_type,
     slugify_name,
 )
@@ -66,6 +67,14 @@ def _configured_speaker_status(sc: SpeakerConfig, status: str) -> dict:
         "config": config_dict,
         "now_playing": None,
     }
+
+
+def _check_speaker(sc: SpeakerConfig) -> None:
+    """Refuse a speaker the next start would reject (ValueError -> HTTP 400)."""
+    try:
+        _validate_speakers([sc])
+    except ConfigError as e:
+        raise ValueError(str(e)) from e
 
 
 def _parse_body_device_type(value: Any) -> str:
@@ -462,6 +471,7 @@ class QobuzProxy:
         all_configs = list(self._config.speakers) + [sc]
         _assign_ports(all_configs, webui_port=self._config.server.http_port)
         _generate_uuids([sc])
+        _check_speaker(sc)
 
         # Persist first so a restart still has this speaker even if start fails.
         self._config.speakers.append(sc)
@@ -532,6 +542,8 @@ class QobuzProxy:
             audio_device=body.get("audio_device", old_config.audio_device),
             audio_buffer_size=int(body.get("buffer_size", old_config.audio_buffer_size)),
         )
+
+        _check_speaker(new_config)
 
         # Persist first: the edit is saved even if the restart below fails
         self._config.speakers[config_idx] = new_config

@@ -33,9 +33,10 @@
 
     function request(method, url, body) {
         var options = { method: method, headers: { Accept: "application/json" } };
-        if (body !== undefined) {
+        if (method !== "GET") {
+            // The add-on only accepts JSON for changes (no cross-site form posts)
             options.headers["Content-Type"] = "application/json";
-            options.body = JSON.stringify(body);
+            options.body = JSON.stringify(body || {});
         }
         return fetch(url, options).then(function (response) {
             return response.json().catch(function () {

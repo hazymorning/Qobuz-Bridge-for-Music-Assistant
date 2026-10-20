@@ -374,7 +374,7 @@ class TestConnectRoute:
         assert fresh.saved().token == ""
 
     async def test_disconnect_forgets_the_login(self, configured):
-        resp = await configured.client.post("/api/music-assistant/disconnect")
+        resp = await configured.client.post("/api/music-assistant/disconnect", json={})
         assert resp.status == 200
         body = await resp.json()
         assert body["is_configured"] is False and body["speaker_count"] == 0
@@ -442,3 +442,27 @@ class TestRequestValidation:
         assert resp.status == 400
         assert (await resp.json())["error"]
         assert configured.saved() == before
+
+
+class TestRequestGuard:
+    async def test_cross_site_changes_are_refused(self, configured):
+        resp = await configured.client.post(
+            "/api/music-assistant/disconnect", json={}, headers={"Sec-Fetch-Site": "cross-site"}
+        )
+        assert resp.status == 403
+        assert configured.saved().token != ""
+
+    async def test_form_posts_are_refused(self, configured):
+        resp = await configured.client.post("/api/auth/logout", data={"a": "1"})
+        assert resp.status == 415
+        configured.client.app["on_logout"].assert_not_awaited()
+
+    async def test_other_sites_cannot_frame_the_panel(self, configured):
+        resp = await configured.client.get("/")
+        assert "frame-ancestors 'self'" in resp.headers["Content-Security-Policy"]
+
+    async def test_overlong_fields_are_refused(self, fresh):
+        resp = await fresh.client.post(
+            "/api/music-assistant/connect", json={**LOGIN, "username": "x" * 1001}
+        )
+        assert resp.status == 400

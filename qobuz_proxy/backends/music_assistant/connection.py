@@ -32,6 +32,8 @@ from music_assistant_models.errors import (
 from . import LoginError
 
 logger = logging.getLogger(__name__)
+# The client's debug log prints every websocket message, the auth token included
+logging.getLogger("music_assistant_client").setLevel(logging.INFO)
 
 T = TypeVar("T")
 
@@ -418,10 +420,14 @@ async def login_and_create_token(url: str, username: str, password: str) -> tupl
         client = MusicAssistantClient(url, http, token=session_token)
         try:
             await asyncio.wait_for(client.connect(), CONNECT_TIMEOUT_SECONDS)
-            token = await client.auth.create_token(TOKEN_NAME)
-            # The login also created a 30-day session token that is no longer needed
-            with contextlib.suppress(MusicAssistantError, MusicAssistantClientException):
-                await client.auth.logout()
+            try:
+                token = await asyncio.wait_for(
+                    client.auth.create_token(TOKEN_NAME), CALL_TIMEOUT_SECONDS
+                )
+            finally:
+                # The login also created a 30-day session token that is no longer needed
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(client.auth.logout(), CALL_TIMEOUT_SECONDS)
         except InsufficientPermissions:
             raise LoginError(
                 "This Music Assistant user is a guest and can't create the long-lived login the "

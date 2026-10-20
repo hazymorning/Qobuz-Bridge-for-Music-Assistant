@@ -220,7 +220,7 @@ async def test_auth_callback_error_redirects_under_ingress(client: TestClient) -
 
 
 async def test_auth_logout(client: TestClient) -> None:
-    resp = await client.post("/api/auth/logout")
+    resp = await client.post("/api/auth/logout", json={})
     assert resp.status == 200
     data = await resp.json()
     assert data["status"] == "ok"
