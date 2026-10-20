@@ -33,7 +33,7 @@ def _speaker(backend_type: str, active: bool) -> tuple[Speaker, AsyncMock]:
         ("dlna", False, True),  # upstream behaviour unchanged
     ],
 )
-async def test_volume_broadcast_only_reaches_the_active_ma_device(
+async def test_volume_broadcast_only_reaches_the_active_music_assistant_device(
     backend_type: str, active: bool, applied: bool
 ) -> None:
     speaker, handle = _speaker(backend_type, active)

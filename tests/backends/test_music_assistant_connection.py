@@ -200,7 +200,7 @@ class TestConnect:
 
 
 class TestReconnect:
-    async def test_unreachable_ma_is_retried_with_growing_backoff(
+    async def test_unreachable_music_assistant_is_retried_with_growing_backoff(
         self,
         conn: MusicAssistantConnection,
         server: FakeMusicAssistantServer,
@@ -266,7 +266,7 @@ class TestReconnect:
         assert delays.picked == list(REAL_RECONNECT_DELAYS[:3])
 
     @pytest.mark.parametrize("graceful", [True, False], ids=["closed", "error"])
-    async def test_lost_connection_is_retried_until_ma_is_back_and_events_flow_again(
+    async def test_lost_connection_is_retried_until_music_assistant_is_back_and_events_flow_again(
         self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer, graceful: bool
     ) -> None:
         await connected(conn, server)
@@ -395,7 +395,7 @@ class TestCall:
             await conn.call("stop", lambda c: c.player_queues.stop(QID))
         assert server.command_log == []
 
-    async def test_ma_error_is_reraised_unchanged_and_keeps_the_connection(
+    async def test_music_assistant_error_is_reraised_unchanged_and_keeps_the_connection(
         self, conn: MusicAssistantConnection, server: FakeMusicAssistantServer
     ) -> None:
         await connected(conn, server)

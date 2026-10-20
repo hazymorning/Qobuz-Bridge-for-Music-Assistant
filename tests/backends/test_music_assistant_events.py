@@ -1,6 +1,6 @@
 """How MusicAssistantBackend maps Music Assistant events onto the Player callbacks.
 
-Natural ends, gapless transitions, MA-UI actions, takeovers by other sources, lost
+Natural ends, gapless transitions, MA-UI actions, other sources playing, lost
 connections and add-on restarts. Uses the rig from ``conftest.py`` (fake MA server +
 real client + real connection, Player callbacks mocked).
 """
@@ -153,8 +153,8 @@ class TestTrackEnd:
         assert rig.cb.endings() == NOTHING_FIRED
 
 
-class TestMAUserActions:
-    async def test_stop_in_ma_mid_track_is_an_interruption(self, rig: Rig) -> None:
+class TestMusicAssistantUserActions:
+    async def test_stop_in_music_assistant_mid_track_is_an_interruption(self, rig: Rig) -> None:
         await rig.play_for("101", 60)
 
         rig.server.ui_stop(QID)
@@ -166,7 +166,9 @@ class TestMAUserActions:
         assert rig.cb.endings() == {**NOTHING_FIRED, "interrupted": 1}
         assert await rig.backend.get_state() == PlaybackState.STOPPED
 
-    async def test_stop_in_ma_in_the_last_seconds_is_still_an_interruption(self, rig: Rig) -> None:
+    async def test_stop_in_music_assistant_in_the_last_seconds_is_still_an_interruption(
+        self, rig: Rig
+    ) -> None:
         await rig.play_for("101", 195)  # 5 s before the end
 
         rig.server.ui_stop(QID)
@@ -175,7 +177,7 @@ class TestMAUserActions:
         await rig.idle(0.3)
         assert rig.cb.endings() == {**NOTHING_FIRED, "interrupted": 1}
 
-    async def test_stop_in_ma_right_after_the_start_is_an_interruption(
+    async def test_stop_in_music_assistant_right_after_the_start_is_an_interruption(
         self,
         rig: Rig,
         timing: Callable[..., None],
@@ -191,7 +193,7 @@ class TestMAUserActions:
         await rig.idle(0.2)
         assert rig.cb.endings() == {**NOTHING_FIRED, "interrupted": 1}
 
-    async def test_pause_resume_and_auto_stop_in_ma(self, rig: Rig) -> None:
+    async def test_pause_resume_and_auto_stop_in_music_assistant(self, rig: Rig) -> None:
         await rig.play_for("101", 30)
 
         rig.server.ui_pause(QID)
@@ -209,7 +211,7 @@ class TestMAUserActions:
         assert rig.queue().corrected_elapsed_time == pytest.approx(30, abs=1)
         assert rig.cb.endings() == NOTHING_FIRED
 
-    async def test_next_in_ma_moves_to_the_armed_track(self, rig: Rig) -> None:
+    async def test_next_in_music_assistant_moves_to_the_armed_track(self, rig: Rig) -> None:
         await rig.play_for("101", 30)
         assert await rig.arm("102")
         rig.cb.position.reset_mock()
@@ -222,7 +224,9 @@ class TestMAUserActions:
         rig.cb.position.assert_called_with(0)
         assert rig.queue_track() == "102"
 
-    async def test_previous_in_ma_to_an_earlier_track_keeps_the_session(self, rig: Rig) -> None:
+    async def test_previous_in_music_assistant_to_an_earlier_track_keeps_the_session(
+        self, rig: Rig
+    ) -> None:
         await rig.play_for("101", 195)
         assert await rig.arm("102")
         rig.server.finish_current_track(QID)
@@ -238,7 +242,7 @@ class TestMAUserActions:
         assert rig.backend._has_external_playback is False
         assert await rig.backend.can_apply_remote_state() is True
 
-    async def test_clearing_the_queue_in_ma_is_an_interruption(self, rig: Rig) -> None:
+    async def test_clearing_the_queue_in_music_assistant_is_an_interruption(self, rig: Rig) -> None:
         await rig.play_for("101", 30)
 
         await other_client_clears_the_queue(rig)
@@ -248,7 +252,7 @@ class TestMAUserActions:
         assert rig.cb.endings() == {**NOTHING_FIRED, "interrupted": 1}
         assert rig.backend._has_external_playback is False
 
-    async def test_seek_in_ma_updates_the_position(self, rig: Rig) -> None:
+    async def test_seek_in_music_assistant_updates_the_position(self, rig: Rig) -> None:
         await rig.play_for("101", 10)
         rig.cb.position.reset_mock()
 
@@ -274,14 +278,14 @@ class TestMAUserActions:
         assert rig.cb.endings() == NOTHING_FIRED
 
 
-class TestTakeover:
+class TestExternalPlayback:
     async def test_external_content_releases_the_session_and_stops_writing(self, rig: Rig) -> None:
         await rig.play_for("101", 30)
         assert await rig.arm("102")
 
         rig.server.user_plays_something_else(QID, "Radio 1")
 
-        await rig.wait(lambda: rig.cb.external.await_count == 1, what="takeover")
+        await rig.wait(lambda: rig.cb.external.await_count == 1, what="external playback")
         assert await rig.backend.check_external_playback() is True
         assert await rig.backend.can_apply_remote_state() is False
         assert await rig.backend.get_state() == PlaybackState.STOPPED
@@ -324,7 +328,7 @@ class TestTakeover:
         await rig.idle(0.2)
         assert rig.cb.external.await_count == 1
 
-    async def test_switching_the_speakers_source_is_a_takeover(self, rig: Rig) -> None:
+    async def test_switching_the_speakers_source_is_a_external_playback(self, rig: Rig) -> None:
         await rig.play_for("101", 30)
 
         rig.server.switch_source(QID, "spotify")
@@ -332,7 +336,7 @@ class TestTakeover:
         await rig.wait(lambda: rig.cb.external.await_count == 1)
         assert rig.cb.interrupted.call_count == 0 and rig.cb.track_ended.call_count == 0
 
-    async def test_qobuz_played_from_mas_own_ui_is_a_takeover(self, rig: Rig) -> None:
+    async def test_qobuz_played_from_mas_own_ui_is_a_external_playback(self, rig: Rig) -> None:
         await rig.play_for("101", 30)
 
         rig.server.user_plays_something_else(QID, track_ids=["555"])
@@ -433,7 +437,9 @@ class TestConnectionLoss:
         assert rig.cb.endings() == NOTHING_FIRED
         assert await rig.backend.get_state() == PlaybackState.PAUSED
 
-    async def test_ma_restart_with_players_back_late_interrupts(self, rig: Rig) -> None:
+    async def test_music_assistant_restart_with_players_back_late_interrupts(
+        self, rig: Rig
+    ) -> None:
         await rig.play_for("101", 60)
 
         rig.server.restart()  # MA stops every queue
@@ -448,7 +454,9 @@ class TestConnectionLoss:
         assert rig.cb.interrupted.call_args.args[0] == pytest.approx(60_000, abs=1_500)
         assert await rig.backend.get_state() == PlaybackState.STOPPED
 
-    async def test_ma_restart_without_our_player_interrupts_after_the_grace(self, rig: Rig) -> None:
+    async def test_music_assistant_restart_without_our_player_interrupts_after_the_grace(
+        self, rig: Rig
+    ) -> None:
         await rig.play_for("101", 60)
 
         rig.server.restart()
@@ -482,7 +490,9 @@ class TestDetached:
         assert rig.cb.endings() == NOTHING_FIRED
         assert rig.server.writes.count(("player_queues/stop", {"queue_id": QID})) == 1
 
-    async def test_no_callbacks_after_an_interruption_while_ma_plays_on(self, rig: Rig) -> None:
+    async def test_no_callbacks_after_an_interruption_while_music_assistant_plays_on(
+        self, rig: Rig
+    ) -> None:
         await rig.play_for("101", 30)
         assert await rig.arm("102")
         rig.server.ui_stop(QID)
@@ -590,7 +600,7 @@ class TestAddonRestart:
         assert [c["option"] for c in rig.calls("player_queues/play_media")] == ["replace"] * 2
         assert rig.queue().corrected_elapsed_time == pytest.approx(0, abs=1)
 
-    async def test_same_track_right_after_our_stop_restarts_even_if_ma_resumed_it(
+    async def test_same_track_right_after_our_stop_restarts_even_if_music_assistant_resumed_it(
         self, rig: Rig
     ) -> None:
         await rig.play_for("101", 50)

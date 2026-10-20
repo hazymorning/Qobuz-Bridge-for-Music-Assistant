@@ -333,13 +333,15 @@ class TestBuildChecks:
         ("state", "configured"),
         [("disconnected", True), ("auth_failed", True), ("not_configured", False)],
     )
-    def test_ma_check_shows_why_music_assistant_is_not_connected(self, state, configured):
+    def test_music_assistant_check_shows_why_music_assistant_is_not_connected(
+        self, state, configured
+    ):
         message = "Can't reach Music Assistant at http://ma:8095."
         status = panel_status(state, message=message, configured=configured, speaker_count=0)
         ma = checks_by_id(build_checks(QOBUZ_IN, status))["music_assistant"]
         assert (ma["level"], ma["detail"]) == ("error", message)
 
-    def test_details_name_the_qobuz_account_and_the_ma_version(self):
+    def test_details_name_the_qobuz_account_and_the_music_assistant_version(self):
         checks = build_checks(QOBUZ_IN, panel_status())
         assert all(set(c) == {"id", "level", "title", "detail"} for c in checks)
         assert "Alice" in checks_by_id(checks)["qobuz"]["detail"]

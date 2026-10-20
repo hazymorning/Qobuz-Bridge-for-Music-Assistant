@@ -335,7 +335,7 @@ class TestIdentity:
 
 
 class TestOffline:
-    async def test_known_players_are_shared_while_ma_is_down(self, h, server):
+    async def test_known_players_are_shared_while_music_assistant_is_down(self, h, server):
         server.reachable = False
         h.configure(
             known_players={
@@ -362,7 +362,7 @@ class TestOffline:
         await h.all_started()
         assert h.factory.starts("up1") == 1
 
-    async def test_player_removed_from_ma_is_kept_for_the_grace_period(
+    async def test_player_removed_from_music_assistant_is_kept_for_the_grace_period(
         self, h, server, monkeypatch
     ):
         monkeypatch.setattr(manager_module, "MISSING_PLAYER_GRACE_SECONDS", 0.3)

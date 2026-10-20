@@ -549,7 +549,9 @@ def assert_no_backend_errors(caplog: pytest.LogCaptureFixture) -> None:
 
 
 class TestAlbumStart:
-    async def test_play_replaces_ma_queue_reports_playing_and_queues_next_gaplessly(self, rig):
+    async def test_play_replaces_music_assistant_queue_reports_playing_and_queues_next_gaplessly(
+        self, rig
+    ):
         await rig.play_album(0)
         await rig.wait_armed("102")
 
@@ -603,7 +605,7 @@ class TestAlbumToTheEnd:
 
 
 class TestAppCommands:
-    async def test_pause_resume_seek_and_volume_become_ma_commands(self, rig):
+    async def test_pause_resume_seek_and_volume_become_music_assistant_commands(self, rig):
         await rig.play_album(0)
         await rig.wait_armed("102")
         rig.server.advance_time(PID, 30)
@@ -668,8 +670,8 @@ class TestAppCommands:
         assert rig.server.track_ids(PID)[0] == "101"
 
 
-class TestMAUserInterface:
-    async def test_pause_resume_and_next_in_ma_show_in_the_app(self, rig):
+class TestMusicAssistantUserInterface:
+    async def test_pause_resume_and_next_in_music_assistant_show_in_the_app(self, rig):
         await rig.play_album(0)
         await rig.wait_armed("102")
         rig.server.advance_time(PID, 20)
@@ -691,7 +693,7 @@ class TestMAUserInterface:
         assert set(rig.writes()) == {"player_queues/play_media"}
         assert rig.plays() == [("replace_next", [uri("103")])]
 
-    async def test_seek_in_ma_moves_the_apps_progress_bar_within_a_heartbeat(
+    async def test_seek_in_music_assistant_moves_the_apps_progress_bar_within_a_heartbeat(
         self, fast_heartbeat, rig
     ):
         await rig.play_album(0)
@@ -708,7 +710,9 @@ class TestMAUserInterface:
         assert rig.server.writes == []  # followed, not seeked again
 
     @pytest.mark.parametrize("left_s", [100, 3], ids=["mid-track", "last-seconds"])
-    async def test_stop_in_ma_shows_stopped_and_never_plays_the_next_track(self, rig, left_s):
+    async def test_stop_in_music_assistant_shows_stopped_and_never_plays_the_next_track(
+        self, rig, left_s
+    ):
         await rig.play_album(0)
         await rig.wait_armed("102")
         await rig.play_to_near_end(left_s)
@@ -723,7 +727,9 @@ class TestMAUserInterface:
         assert rig.player.current_track.track_id == "101"  # stopped, not finished
         assert rig.ws.is_renderer_active
 
-    async def test_after_a_stop_in_ma_the_proxy_never_takes_ma_back(self, rig):
+    async def test_after_a_stop_in_music_assistant_the_proxy_never_takes_music_assistant_back(
+        self, rig
+    ):
         await rig.play_album(0)
         await rig.wait_armed("102")
         rig.server.advance_time(PID, 30)
@@ -746,7 +752,7 @@ class TestMAUserInterface:
         assert rig.server.writes == []  # no re-queue, no replay of track 2, no stop
         assert rig.player.state == PlaybackState.STOPPED
 
-    async def test_previous_in_ma_shows_stopped_but_keeps_the_session(self, rig):
+    async def test_previous_in_music_assistant_shows_stopped_but_keeps_the_session(self, rig):
         await rig.play_album(0)
         await rig.wait_armed("102")
         await rig.finish_track()
@@ -764,7 +770,7 @@ class TestMAUserInterface:
         assert not rig.ws._external_playback
 
 
-async def take_over(rig: Rig) -> None:
+async def play_something_else_in_music_assistant(rig: Rig) -> None:
     await rig.play_album(0)
     await rig.wait_armed("102")
     await rig.idle(0.2)  # past the start grace
@@ -773,9 +779,9 @@ async def take_over(rig: Rig) -> None:
     await rig.wait_for(lambda: rig.ws._external_playback, "Qobuz session released")
 
 
-class TestTakeoverInMA:
+class TestExternalPlaybackInMusicAssistant:
     async def test_other_music_releases_the_qobuz_session(self, rig):
-        await take_over(rig)
+        await play_something_else_in_music_assistant(rig)
 
         assert rig.player.state == PlaybackState.STOPPED
         assert not rig.ws.is_renderer_active
@@ -787,8 +793,10 @@ class TestTakeoverInMA:
             queue.current_item.name == "Jazz Radio" and queue.state == MusicAssistantState.PLAYING
         )
 
-    async def test_no_ma_writes_after_a_takeover_even_for_replayed_snapshots(self, rig):
-        await take_over(rig)
+    async def test_no_music_assistant_writes_after_a_external_playback_even_for_replayed_snapshots(
+        self, rig
+    ):
+        await play_something_else_in_music_assistant(rig)
 
         # The cloud replays the old session state (dropped by the released socket) ...
         await rig.deliver(set_active(True), album_state(0, APP_PLAYING, pos=4_000))
@@ -807,7 +815,7 @@ class TestTakeoverInMA:
         assert rig.server.players[PID].volume_level != 10
 
     async def test_selecting_the_device_again_takes_the_player_back(self, rig):
-        await take_over(rig)
+        await play_something_else_in_music_assistant(rig)
         assert rig.server.queue(PID).state == MusicAssistantState.PLAYING  # the radio still plays
 
         await rig.select()
@@ -819,7 +827,7 @@ class TestTakeoverInMA:
 
 
 class TestEndOfQueue:
-    async def test_last_track_ends_stopped_and_ma_is_left_alone(self, rig):
+    async def test_last_track_ends_stopped_and_music_assistant_is_left_alone(self, rig):
         await rig.play_album(2)  # the album's last track: no next
         await rig.finish_track()
         await rig.wait_for(lambda: rig.app()[0] == APP_STOPPED, "app shows stopped")
@@ -834,7 +842,9 @@ class TestEndOfQueue:
         assert rig.queue_state() == MusicAssistantState.IDLE and rig.server.queue(PID).ended
         assert rig.plays() == []
 
-    async def test_repeat_and_autoplay_in_ma_are_turned_off_so_the_album_ends(self, server, rig):
+    async def test_repeat_and_autoplay_in_music_assistant_are_turned_off_so_the_album_ends(
+        self, server, rig
+    ):
         from music_assistant_models.enums import RepeatMode
 
         server.queue(PID).repeat_mode = RepeatMode.ALL
@@ -850,7 +860,7 @@ class TestEndOfQueue:
 
 
 class TestUnavailableTracks:
-    async def test_region_blocked_track_is_skipped_and_never_sent_to_ma(self, rig):
+    async def test_region_blocked_track_is_skipped_and_never_sent_to_music_assistant(self, rig):
         rig.metadata.unavailable = {"102"}
         await rig.play_album(0)
         await rig.idle(0.6)  # the player tries to queue track 2: no URL, so nothing reaches MA
@@ -870,7 +880,7 @@ class TestUnavailableTracks:
         assert all(uri("102") not in media for _, media in rig.plays())
         assert "102" not in rig.server.track_ids(PID)
 
-    async def test_track_ma_cannot_play_is_skipped_and_the_album_continues(self, rig):
+    async def test_track_music_assistant_cannot_play_is_skipped_and_the_album_continues(self, rig):
         rig.server.unplayable_track_ids = {"102"}
         await rig.play_album(0)
         await rig.idle(0.6)
@@ -937,7 +947,7 @@ class TestGroupPlayer:
             await rig.close()
 
 
-class TestMARestart:
+class TestMusicAssistantRestart:
     async def test_quick_restart_shows_stopped_and_play_works_after_reconnect(self, rig, caplog):
         await rig.play_album(0)
         await rig.wait_armed("102")
@@ -1029,7 +1039,7 @@ class TestAddonRestart:
         await second.wait_for(lambda: second.player.state == PlaybackState.PLAYING, "playing")
         return second, items_before
 
-    async def test_restart_mid_play_takes_over_what_ma_plays_without_restarting_it(
+    async def test_restart_mid_play_takes_over_what_music_assistant_plays_without_restarting_it(
         self, fast_heartbeat, server, monkeypatch, tmp_path
     ):
         second, _ = await self._restart_mid_play(server, monkeypatch, tmp_path)
@@ -1059,7 +1069,7 @@ class TestAddonRestart:
         finally:
             await second.close()
 
-    async def test_restart_keeps_the_next_track_ma_already_has_queued(
+    async def test_restart_keeps_the_next_track_music_assistant_already_has_queued(
         self, fast_heartbeat, server, monkeypatch, tmp_path
     ):
         second, items_before = await self._restart_mid_play(server, monkeypatch, tmp_path)
@@ -1073,7 +1083,7 @@ class TestAddonRestart:
 
 
 class TestSwitchQobuzDevice:
-    async def test_switching_away_stops_ma_once_and_switching_back_plays(self, rig):
+    async def test_switching_away_stops_music_assistant_once_and_switching_back_plays(self, rig):
         await rig.play_album(0)
         await rig.wait_armed("102")
         rig.server.advance_time(PID, 40)
@@ -1141,8 +1151,8 @@ class TestTwoQobuzApps:
         }
 
 
-class TestMAUnreachableAtBoot:
-    async def test_play_fails_cleanly_while_ma_is_down_and_works_once_it_is_back(
+class TestMusicAssistantUnreachableAtBoot:
+    async def test_play_fails_cleanly_while_music_assistant_is_down_and_works_once_it_is_back(
         self, server, monkeypatch, caplog
     ):
         server.reachable = False
