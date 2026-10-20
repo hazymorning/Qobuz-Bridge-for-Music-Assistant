@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 NAME_SUFFIX = " (MA)"
+NAME_MAX_LENGTH = 40  # characters in a name the user gives a speaker
 FIRST_PORT = 8700  # clear of the main web port (8689) and config.yaml speakers (8690+)
 UPDATE_DELAY_SECONDS = 1.0
 # MA re-registers players slowly after a restart; don't drop their speakers for that.
@@ -207,6 +208,34 @@ class MusicAssistantSpeakers:
         )
         await self.update_speakers()
 
+    async def set_speaker_name(self, player_id: str, name: str) -> None:
+        """Give a player's speaker the user's own name; an empty name brings back the default.
+
+        Raises:
+            ValueError: with a message for the web UI.
+        """
+        name = " ".join(name.split())
+        if player_id not in self._settings.known_players:
+            raise ValueError("That Music Assistant player is not known (any more).")
+        if len(name) > NAME_MAX_LENGTH:
+            raise ValueError(f"Keep the name to {NAME_MAX_LENGTH} characters.")
+        if not name.isprintable():
+            raise ValueError("The name can only have letters, numbers, spaces and punctuation.")
+        others = [c.name for i, c in self._wanted_speakers().items() if i != player_id]
+        others += [n for i, n in self._settings.speaker_names.items() if i != player_id]
+        if name and slugify_name(name) in {slugify_name(other) for other in others}:
+            raise ValueError(f"Another speaker is already called “{name}”.")
+        if name:
+            self._settings.speaker_names[player_id] = name
+        else:
+            self._settings.speaker_names.pop(player_id, None)
+        self._save()
+        logger.info(
+            f"Speaker name for {self._settings.known_players[player_id].name}: "
+            + (name or "the default")
+        )
+        await self.update_speakers()
+
     def status(self) -> dict[str, Any]:
         """What the web UI shows; never the token."""
         live = self._update_known_players()
@@ -229,6 +258,8 @@ class MusicAssistantSpeakers:
                     "hidden": p.hidden,
                     "selected": player_id in self._settings.selected_player_ids,
                     "speaker_name": wanted[player_id].name if player_id in wanted else "",
+                    "custom_name": self._settings.speaker_names.get(player_id, ""),
+                    "default_name": p.name + NAME_SUFFIX,
                 }
                 for player_id, p in sorted(known.items(), key=lambda kv: kv[1].name.lower())
             ],
@@ -341,6 +372,7 @@ class MusicAssistantSpeakers:
                 del known[player_id]
                 del self._missing_since[player_id]
                 self._settings.sessions.pop(player_id, None)
+                self._settings.speaker_names.pop(player_id, None)
                 changed = True
         if changed:
             self._save()
@@ -358,7 +390,9 @@ class MusicAssistantSpeakers:
         used: set[str] = set()
         configs = {}
         for player_id in sorted(exposed):
-            base = known[player_id].name + NAME_SUFFIX
+            base = (
+                self._settings.speaker_names.get(player_id) or known[player_id].name + NAME_SUFFIX
+            )
             name, n = base, 2
             while slugify_name(name) in used:
                 name, n = f"{base} {n}", n + 1

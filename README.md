@@ -24,7 +24,8 @@ a Qobuz subscription.
    token instead**, create a long-lived token in your Music Assistant user profile and paste it.
    The address is filled in for the Music Assistant add-on; change it if yours runs elsewhere.
 6. Under **Speakers in the Qobuz app**, leave **All my Music Assistant players** on, or switch it
-   off and tick the players you want.
+   off and tick the players you want. Tap **Rename** under a player to give its speaker your own
+   name.
 
 Now open the Qobuz app, tap the device picker and choose a speaker. Their names end in **(MA)**.
 

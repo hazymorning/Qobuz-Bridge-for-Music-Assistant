@@ -25,6 +25,7 @@ STATUS = "/api/music-assistant/status"
 CONNECT = "/api/music-assistant/connect"
 DISCONNECT = "/api/music-assistant/disconnect"
 PLAYERS = "/api/music-assistant/players"
+SPEAKER_NAME = "/api/music-assistant/speaker-name"
 
 
 class SilentSpeaker:
@@ -314,6 +315,29 @@ async def test_a_partial_player_choice_is_applied_saved_and_keeps_the_other_sett
     assert (saved.expose_all, saved.selected_player_ids) == (False, [KITCHEN])
 
 
+async def test_a_speaker_is_renamed_in_the_panel_and_an_empty_name_brings_the_default_back(
+    panel,
+):
+    await panel.set_up()
+
+    status = await _ok(
+        await panel.client.put(SPEAKER_NAME, json={"player_id": KITCHEN, "name": "Küche"})
+    )
+    kitchen = next(p for p in status["players"] if p["player_id"] == KITCHEN)
+    assert (kitchen["speaker_name"], kitchen["custom_name"]) == ("Küche", "Küche")
+    assert kitchen["default_name"] == "Kitchen (MA)"  # what an empty name brings back
+
+    taken = await panel.client.put(SPEAKER_NAME, json={"player_id": "up2", "name": "Küche"})
+    assert taken.status == 400
+    assert "already called" in (await taken.json())["error"]
+
+    status = await _ok(
+        await panel.client.put(SPEAKER_NAME, json={"player_id": KITCHEN, "name": ""})
+    )
+    kitchen = next(p for p in status["players"] if p["player_id"] == KITCHEN)
+    assert (kitchen["speaker_name"], kitchen["custom_name"]) == ("Kitchen (MA)", "")
+
+
 async def test_malformed_requests_are_refused_and_change_nothing(panel, server):
     await panel.set_up()
     before = panel.settings_path.read_text()
@@ -326,6 +350,13 @@ async def test_malformed_requests_are_refused_and_change_nothing(panel, server):
         ("POST", CONNECT, {**good, "password": 123}, "Invalid field: password"),
         ("PUT", PLAYERS, {"expose_all": "no"}, "Invalid field: expose_all"),
         ("PUT", PLAYERS, {"selected": [1, 2]}, "Invalid field: selected"),
+        ("PUT", SPEAKER_NAME, {"name": "No player"}, "Invalid request."),
+        (
+            "PUT",
+            SPEAKER_NAME,
+            {"player_id": "gone", "name": "X"},
+            "That Music Assistant player is not known (any more).",
+        ),
         # Both would succeed without the length limit
         ("POST", CONNECT, {**good, "url": good["url"] + "/" * 1000}, "Invalid field: url"),
         ("PUT", PLAYERS, {"selected": ["up2"] * 1001}, "Invalid field: selected"),

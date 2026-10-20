@@ -41,7 +41,8 @@ previous or clearing the queue in Music Assistant show the speaker as stopped.
    in your Music Assistant user profile. The address is filled in for the Music Assistant add-on
    (`http://127.0.0.1:8095`); change it if yours runs elsewhere.
 6. **Choose the players.** **All my Music Assistant players** is on by default. Switch it off to
-   tick only the players and groups you want.
+   tick only the players and groups you want. **Rename** under a player gives its speaker your own
+   name.
 7. **Play.** In the Qobuz app, tap the device picker and choose a speaker. Names end in **(MA)**.
 
 ## Status checks
@@ -61,9 +62,12 @@ The top of the panel says what is wrong and what to do:
   Assistant players** on, players hidden in Music Assistant are left out.
 - Each one is named after the Music Assistant player plus " (MA)", which keeps it apart from
   speakers with Qobuz Connect built in (a WiiM then shows up twice; the "(MA)" one plays through
-  Music Assistant).
-- Each speaker keeps its identity across restarts, so the Qobuz app remembers it. Renaming a
-  player in Music Assistant renames the speaker once it is not playing.
+  Music Assistant). **Rename** gives a speaker your own name instead (up to 40 characters, used
+  exactly as you type it); clear the name to get the default back.
+- Each speaker keeps its identity across restarts and renames, so the Qobuz app remembers it. A
+  new name (yours, or the player's in Music Assistant) applies once the speaker is not playing.
+- A party speaker: make a group player in Music Assistant with all the speakers that should play
+  together. It shows up as its own speaker in the Qobuz app; rename it to "Party" if you like.
 - After a Music Assistant restart players can take a while to come back; their speakers are kept
   for 30 minutes.
 

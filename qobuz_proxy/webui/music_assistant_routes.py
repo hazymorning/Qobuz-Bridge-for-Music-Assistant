@@ -182,6 +182,19 @@ async def _handle_connect(request: web.Request) -> web.Response:
     return web.json_response(_panel_status(request))
 
 
+async def _handle_speaker_name(request: web.Request) -> web.Response:
+    body = await _read_body(request, {"player_id": str, "name": str})
+    if "player_id" not in body:
+        raise _bad_request("Invalid request.")
+    try:
+        await request.app["music_assistant"].set_speaker_name(
+            body["player_id"], body.get("name", "")
+        )
+    except ValueError as e:
+        raise _bad_request(str(e)) from None
+    return web.json_response(_panel_status(request))
+
+
 async def _handle_disconnect(request: web.Request) -> web.Response:
     await request.app["music_assistant"].disconnect()
     return web.json_response(_panel_status(request))
@@ -202,3 +215,4 @@ def register_music_assistant_routes(app: web.Application) -> None:
     app.router.add_post("/api/music-assistant/connect", _handle_connect)
     app.router.add_post("/api/music-assistant/disconnect", _handle_disconnect)
     app.router.add_put("/api/music-assistant/players", _handle_players)
+    app.router.add_put("/api/music-assistant/speaker-name", _handle_speaker_name)

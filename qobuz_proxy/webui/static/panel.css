@@ -167,6 +167,21 @@ input[type="checkbox"] {
     margin: 0;
 }
 
+.rename {
+    min-height: 32px;
+    margin: -8px 0 6px 34px;
+    font-size: 13px;
+}
+
+.rename-form {
+    padding: 0 0 12px 34px;
+}
+
+.rename-buttons {
+    display: flex;
+    gap: 8px;
+}
+
 .badge {
     display: inline-block;
     margin-right: 4px;
