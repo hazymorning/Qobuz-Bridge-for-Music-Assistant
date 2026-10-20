@@ -1,0 +1,32 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  code:
+    name: Lint, types and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.32"
+      - run: uv sync --locked
+      - run: uv run ruff format --check qobuz_proxy tests
+      - run: uv run ruff check qobuz_proxy tests
+      - run: uv run mypy qobuz_proxy
+      - run: uv run pytest
+
+  image:
+    name: Add-on image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Both Dockerfiles are the same
+        run: cmp Dockerfile.amd64 Dockerfile.aarch64
+      - run: docker build --file Dockerfile.amd64 .
