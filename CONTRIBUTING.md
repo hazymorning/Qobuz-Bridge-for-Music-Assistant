@@ -87,8 +87,8 @@ uv run mypy qobuz_proxy/
 uv run pytest
 ```
 
-mypy currently reports some pre-existing errors on `main`. That is fine, just
-make sure your change does not add new ones.
+All four must come back clean. Type errors inherited from upstream QobuzProxy
+are switched off per module in `pyproject.toml`; don't add new modules there.
 
 New behavior comes with tests. Changed behavior comes with changed tests.
 Tests live under `tests/` mirroring the source tree.

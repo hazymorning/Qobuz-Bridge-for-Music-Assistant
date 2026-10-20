@@ -1,6 +1,6 @@
 {
   "name": "Qobuz Bridge for Music Assistant",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "slug": "qobuz_bridge",
   "description": "Pick your Music Assistant speakers and groups as Qobuz Connect devices in the Qobuz app",
   "url": "https://github.com/hazymorning/Qobuz-Bridge-for-Music-Assistant",
