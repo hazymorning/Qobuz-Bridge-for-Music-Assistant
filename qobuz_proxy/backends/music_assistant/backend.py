@@ -1197,7 +1197,6 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         """MA reached a next track the Qobuz app no longer wants (it was already buffered)."""
         if self._stale_task is not None and not self._stale_task.done():
             return
-        self._stale_item_ids.discard(item_id)
         armed = self._armed
         queue_id = self._player_id
 
@@ -1227,6 +1226,9 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
             except (NotConnectedError, MusicAssistantError) as e:
                 logger.warning("[%s] Could not step past the stale track: %s", self.name, e)
             finally:
+                # Stale until now: MA sends several events per track change, and one handled
+                # before this step is done would read the item as "went back" and stop the app
+                self._stale_item_ids.discard(item_id)
                 self._writes_in_flight -= 1
                 asyncio.get_running_loop().call_soon(self._check_queue)
 
