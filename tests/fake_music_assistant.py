@@ -1,15 +1,25 @@
 """In-memory Music Assistant 2.10.7 server that drives the real ``music-assistant-client``.
 
-:class:`FakeMusicAssistantServer` keeps what a real MA server keeps (players, queues, queue items,
-providers, tokens) and outlives the single-use clients the product builds on every reconnect.
-Its queue logic is a port of MA 2.10.7 ``controllers/player_queues`` and it emits the same events
-in the same order. Only the websocket is fake: :class:`FakeMusicAssistantClient` is the real
-client with :class:`FakeWebsocketsConnection` swapped in, so the product's error handling and
-event races run against real client code.
+:class:`FakeMusicAssistantServer` keeps what a real Music Assistant server keeps (players, queues,
+queue items, providers, tokens) and outlives the single-use clients the product builds on every
+reconnect. Its queue logic is a port of Music Assistant 2.10.7 ``controllers/player_queues`` and
+it emits the same events in the same order. Only the websocket is fake:
+:class:`FakeMusicAssistantClient` is the real client with :class:`FakeWebsocketsConnection`
+swapped in, so the product's error handling and event races run against real client code.
 
-Time never passes on its own: ``advance_time``, ``finish_current_track``, ``mark_ended`` and
-``auto_stop_after_pause`` stand in for MA's timers, and ``settle()`` only yields to the event
-loop, so tests patch the product's timing constants.
+The hooks a test drives it with:
+
+- someone in Music Assistant's UI: ``ui_pause``, ``ui_resume``, ``ui_stop``, ``ui_clear``,
+  ``ui_next``, ``ui_previous``, ``ui_seek``; another client: ``user_plays_something_else``
+- the speaker itself: ``device_reports`` (a state or position), ``buffer_next``,
+  ``switch_source`` (another source)
+- time, which never passes on its own: ``advance_time``, ``finish_current_track``,
+  ``mark_ended``, ``auto_stop_after_pause``
+- the server: ``set_reachable``, ``restart`` and ``come_back``, ``revoke_token``
+- commands: ``gate`` and ``release`` (hold one), ``fail_next`` (answer one with an error),
+  ``calls`` and ``writes`` (what clients sent)
+- ``settle()``: let commands and events run; it only yields to the event loop, so tests patch
+  the product's timing constants
 """
 
 from __future__ import annotations
@@ -73,6 +83,7 @@ from music_assistant_models.unique_list import UniqueList
 SCHEMA_VERSION = 65  # MA 2.10.7 constants.API_SCHEMA_VERSION
 MIN_SCHEMA_VERSION = 28  # MA 2.10.7 constants.MIN_SCHEMA_VERSION
 TRACK_DURATION = 200  # seconds, every track
+ADMIN_PASSWORD = "admin-password"
 ATTR_PLAY_ACTION_IN_PROGRESS = "play_action_in_progress"
 # Commands that only read state: ``FakeMusicAssistantServer.writes`` leaves them out
 READ_COMMANDS = frozenset(
@@ -106,7 +117,8 @@ class FakeMusicAssistantServer:
     ``library_track_ids`` (come back as library items with the Qobuz id only in the provider
     mapping), ``dead_player_ids`` (speakers that never start playing).
     Logs: ``command_log`` (``(command, args)`` of every command but ``auth``; args are JSON, and
-    enums equal their ``StrEnum`` members) and ``created_clients``.
+    enums equal their ``StrEnum`` members), ``created_clients`` and ``issued_tokens`` (every
+    token it handed out).
     """
 
     def __init__(self) -> None:
@@ -115,7 +127,7 @@ class FakeMusicAssistantServer:
         self.token = "fake-ma-long-lived-token"
         self.server_version = "2.10.7"
         self.min_schema_version = MIN_SCHEMA_VERSION
-        self.users = {"admin": "admin-password"}
+        self.users = {"admin": ADMIN_PASSWORD}
         self.guest_users: set[str] = set()
         self.reachable = True
         self.setup_required = False
@@ -131,6 +143,7 @@ class FakeMusicAssistantServer:
         self.fail_next: dict[str, Any] = {}
         self.command_log: list[tuple[str, dict[str, Any]]] = []
         self.created_clients: list[FakeMusicAssistantClient] = []
+        self.issued_tokens: list[str] = []
         # ``MusicAssistantClient`` replacement bound to this server (same signature)
         self.client_class: type[FakeMusicAssistantClient] = type(
             "FakeMusicAssistantClient", (FakeMusicAssistantClient,), {"server": self}
@@ -759,6 +772,7 @@ class FakeMusicAssistantServer:
         self._token_seq += 1
         token = f"fake-{kind}-token-{self._token_seq}"
         self._token_users[token] = username
+        self.issued_tokens.append(token)
         return token
 
     def _user(self, username: str) -> User:

@@ -1,4 +1,5 @@
-"""What this repo changes inside upstream QobuzProxy files (speaker.py, player.py, app.py, base.py).
+"""What this repo changes inside upstream QobuzProxy files: the hooks in app.py, speaker.py,
+playback/player.py, backends/base.py, backends/types.py and webui/routes.py.
 
 Run these after merging upstream: each one fails if the merge lost one of those changes.
 """
@@ -14,6 +15,7 @@ import aiohttp
 import pytest
 from music_assistant_models.enums import PlaybackState as MusicAssistantState
 
+from qobuz_proxy import app as app_module
 from qobuz_proxy import speaker as speaker_module
 from qobuz_proxy.app import QobuzProxy
 from qobuz_proxy.backends import BackendTrackMetadata, PlaybackState
@@ -24,7 +26,6 @@ from qobuz_proxy.backends.music_assistant import speakers as speakers_module
 from qobuz_proxy.config import Config, QobuzConfig, ServerConfig, SpeakerConfig
 from qobuz_proxy.playback.player import QobuzPlayer
 from qobuz_proxy.playback.queue import QobuzQueue
-from qobuz_proxy.proto import qconnect_payload_pb2 as pb
 from qobuz_proxy.webui.config_writer import save_config
 from tests.fake_music_assistant import FakeMusicAssistantServer
 from tests.fake_qobuz import (
@@ -34,52 +35,37 @@ from tests.fake_qobuz import (
     StubMetadata,
     album_state,
     set_active,
+    set_max_quality,
     set_volume,
+    volume_broadcast,
 )
-from tests.rig import PID, Rig, wait_for
+from tests.rig import KITCHEN, wait_for
 
 CD_QUALITY = 2  # what the app sends for CD quality; Qobuz calls it format 6
-
-
-def _volume_broadcast(level: int) -> Any:
-    """The cloud telling every device in the session that the volume changed (no renderer id)."""
-    msg = pb.QConnectMessage(messageType=87)
-    msg.srvrCtrlVolumeChanged.volume = level
-    return msg
-
-
-def _max_quality(level: int) -> Any:
-    msg = pb.QConnectMessage(messageType=44)
-    msg.srvrRndrSetMaxAudioQuality.maxAudioQuality = level
-    return msg
-
-
-def _volumes_set_in_music_assistant(rig: Rig) -> list[int]:
-    return [call["volume_level"] for call in rig.server.calls("players/cmd/group_volume")]
 
 
 async def test_a_volume_broadcast_reaches_only_the_active_speaker_but_a_direct_command_always_does(
     rig,
 ):
-    await rig.deliver(_volume_broadcast(25))
-    await rig.wait_for(lambda: _volumes_set_in_music_assistant(rig) == [25], "volume 25")
+    await rig.deliver(volume_broadcast(25))
+    await rig.wait_for(lambda: rig.volumes_set() == [25], "volume 25")
 
     await rig.deliver(set_active(False))  # the app now plays on another device
-    await rig.deliver(_volume_broadcast(60))
+    await rig.deliver(volume_broadcast(60))
     await rig.deliver(set_volume(45))  # addressed to this speaker
-    await rig.wait_for(lambda: _volumes_set_in_music_assistant(rig)[-1] == 45, "volume 45")
+    await rig.wait_for(lambda: rig.volumes_set()[-1] == 45, "volume 45")
 
-    assert _volumes_set_in_music_assistant(rig) == [25, 45]
+    assert rig.volumes_set() == [25, 45]
 
 
 async def test_a_volume_change_in_music_assistant_shows_in_the_app_only_while_the_speaker_is_active(
     rig,
 ):
-    rig.server.set_player_volume(PID, 40)
+    rig.server.set_player_volume(KITCHEN, 40)
     await rig.wait_for(lambda: 40 in rig.cloud.volumes, "the app shows volume 40")
 
     await rig.deliver(set_active(False))
-    rig.server.set_player_volume(PID, 70)
+    rig.server.set_player_volume(KITCHEN, 70)
     await rig.idle(0.2)
 
     assert 70 not in rig.cloud.volumes
@@ -91,7 +77,7 @@ async def test_playing_from_a_position_starts_music_assistant_there_without_a_se
         lambda: rig.queue_state() == MusicAssistantState.PLAYING, "Music Assistant playing"
     )
 
-    assert rig.server.queue(PID).corrected_elapsed_time == pytest.approx(61, abs=1)
+    assert rig.queue_position() == pytest.approx(61, abs=1)
     assert rig.server.calls("player_queues/seek") == []
 
 
@@ -114,11 +100,11 @@ async def test_music_assistant_streams_the_track_itself_so_the_add_on_never_rest
     await rig.wait_armed("102")
     rig.server.clear_logs()
 
-    await rig.deliver(_max_quality(CD_QUALITY))
+    await rig.deliver(set_max_quality(CD_QUALITY))
     await rig.idle(0.2)
 
     assert rig.metadata.max_qualities == [6]  # the speaker took the app's choice...
-    assert rig.server.writes == []  # ...without restarting the track for it
+    assert rig.writes() == []  # ...without restarting the track for it
     assert rig.app() == (APP_PLAYING, 1)
     # Music Assistant's Qobuz provider reports every play; a second report would count it twice.
     # The Qobuz API client the rig gave the speaker is the only place a report would show.
@@ -180,7 +166,7 @@ class MusicAssistantRenderer(Renderer):
 
 @pytest.fixture
 def fast_polls(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No sleep lasts over 1 ms, so the player polls its device that often instead of every 0.5 s."""
+    """No sleep lasts over 1 ms, so the player polls its device that often, not every 0.5 s."""
     sleep = asyncio.sleep
 
     async def short_sleep(delay: float, result: Any = None) -> Any:
@@ -201,9 +187,8 @@ async def _paused_player(renderer: Renderer) -> AsyncIterator[QobuzPlayer]:
         await player.stop()
 
 
-async def test_a_paused_player_stops_with_its_device_but_resumes_only_if_its_backend_reports_resumes(
-    fast_polls,
-):
+@pytest.mark.usefixtures("fast_polls")
+async def test_a_paused_player_stops_with_its_device_but_resumes_only_if_its_backend_reports_it():
     music_assistant = MusicAssistantRenderer()
     dlna = Renderer()
     async with _paused_player(music_assistant) as followed, _paused_player(dlna) as ignored:
@@ -247,11 +232,12 @@ async def _qobuz_sign_in_with_a_new_token(code: str, **_: object) -> dict[str, s
 
 @pytest.fixture
 def config_from_an_earlier_run(
-    server: FakeMusicAssistantServer, tmp_path, monkeypatch: pytest.MonkeyPatch
+    server: FakeMusicAssistantServer, monkeypatch: pytest.MonkeyPatch
 ) -> Config:
     """Qobuz and Music Assistant were both set up in an earlier run; returns the add-on's config."""
     settings.save(
-        tmp_path / "music_assistant.json", settings.Settings(url=server.url, token=server.token)
+        app_module.CACHE_DIR / "music_assistant.json",
+        settings.Settings(url=server.url, token=server.token),
     )
     monkeypatch.setattr(
         connection_module,
@@ -263,10 +249,8 @@ def config_from_an_earlier_run(
     monkeypatch.setattr(speakers_module, "UPDATE_DELAY_SECONDS", 0.01)
     monkeypatch.setattr("qobuz_proxy.app.QobuzAPIClient", _QobuzAcceptingTheSavedLogin)
     monkeypatch.setattr("qobuz_proxy.webui.routes.exchange_code", _qobuz_sign_in_with_a_new_token)
-    # A logout clears the saved Qobuz login: keep the developer's own out of reach
-    monkeypatch.setattr("qobuz_proxy.auth.credentials.CACHE_FILE", tmp_path / "credentials.json")
     monkeypatch.setattr(speaker_module, "DiscoveryService", StubDiscovery)
-    monkeypatch.setattr(speaker_module, "MetadataService", lambda **kw: StubMetadata())
+    monkeypatch.setattr(speaker_module, "MetadataService", lambda **kwargs: StubMetadata())
     return Config(
         qobuz=QobuzConfig(user_id="1", auth_token="saved"),
         server=ServerConfig(http_port=0, bind_address="127.0.0.1"),

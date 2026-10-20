@@ -1,14 +1,15 @@
 """One Music Assistant player exposed as a Qobuz Connect device, wired like production.
 
 Real: the Speaker wiring (``Speaker.start`` and ``Speaker._setup_websocket``), the WsManager
-connection loop (authenticate, subscribe, join, receive), PlaybackCommandHandler, QueueHandler,
+connection loop (authenticate, subscribe, join), PlaybackCommandHandler, QueueHandler,
 VolumeCommandHandler, StateReporter, QobuzPlayer, QobuzQueue, the shared
 MusicAssistantConnection, MusicAssistantBackend and the real music-assistant-client talking to
 the in-memory FakeMusicAssistantServer.
 
-Fake: the Qobuz Connect cloud socket (``QobuzCloud`` decodes every frame the renderer sends,
-which is exactly what the Qobuz app gets to see), the Qobuz track API (``StubMetadata``: URL and
-metadata per track id; a region-blocked track has neither) and mDNS/HTTP discovery.
+Fake: the Qobuz Connect cloud (``QobuzCloud`` decodes every frame the renderer sends, which is
+exactly what the Qobuz app gets to see; the app's frames are injected at
+``WsManager._handle_payload``), the Qobuz track API (``StubMetadata``: URL and metadata per track
+id; a region-blocked track has neither) and mDNS/HTTP discovery.
 
 Time: Music Assistant playback only moves with ``server.advance_time``; the backend's timers are
 patched to milliseconds and every wait is a bounded poll (``Rig.wait_for``).
@@ -19,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+from itertools import groupby
 from typing import Any, Callable, Optional
 from unittest.mock import MagicMock
 
@@ -35,10 +37,9 @@ from qobuz_proxy.connect.protocol import DecodedMessage, MessageType
 from qobuz_proxy.connect.types import ConnectTokens
 from qobuz_proxy.proto import qconnect_payload_pb2 as pb
 from qobuz_proxy.speaker import Speaker
-from tests.fake_music_assistant import FakeMusicAssistantServer
+from tests.fake_music_assistant import TRACK_DURATION, FakeMusicAssistantServer
 from tests.fake_qobuz import (
     ALBUM,
-    TRACK_S,
     QobuzCloud,
     StubDiscovery,
     StubMetadata,
@@ -47,7 +48,7 @@ from tests.fake_qobuz import (
     set_active,
 )
 
-PID = "up1"
+KITCHEN = "up1"  # the player id of Kitchen, the one player every test starts with
 BACKEND_LOGGER = "qobuz_proxy.backends.music_assistant"
 
 
@@ -91,7 +92,7 @@ class Rig:
         server: FakeMusicAssistantServer,
         monkeypatch: pytest.MonkeyPatch,
         *,
-        player_id: str = PID,
+        player_id: str = KITCHEN,
         name: str = "Kitchen (MA)",
         sessions: Optional[dict[str, dict[str, Any]]] = None,
     ) -> None:
@@ -104,26 +105,21 @@ class Rig:
         self.metadata = StubMetadata()
         self.tokens = make_tokens()
         self.tasks: list[asyncio.Future[Any]] = []
-        self.conn: Optional[MusicAssistantConnection] = None
+        self.connection: Optional[MusicAssistantConnection] = None
         self.speaker: Optional[Speaker] = None
-        self.discovery: Optional[StubDiscovery] = None
         monkeypatch.setattr(websockets, "connect", self.cloud.connect)
-        monkeypatch.setattr(speaker_module, "DiscoveryService", self._make_discovery)
-        monkeypatch.setattr(speaker_module, "MetadataService", lambda **kw: self.metadata)
-
-    def _make_discovery(self, *args: Any, **kwargs: Any) -> StubDiscovery:
-        self.discovery = StubDiscovery(*args, **kwargs)
-        return self.discovery
+        monkeypatch.setattr(speaker_module, "DiscoveryService", StubDiscovery)
+        monkeypatch.setattr(speaker_module, "MetadataService", lambda **kwargs: self.metadata)
 
     async def start(self, *, wait_for_music_assistant: bool = True) -> Rig:
-        self.conn = MusicAssistantConnection(
+        connection = self.connection = MusicAssistantConnection(
             self.server.url, self.server.token, client_factory=self.server.client_factory
         )
-        await self.conn.start()
+        await connection.start()
         if wait_for_music_assistant:
-            await self.wait_for(lambda: self.conn is not None and self.conn.is_connected, "MA")
+            await self.wait_for(lambda: connection.is_connected, "Music Assistant connected")
         backend = MusicAssistantBackend(
-            self.conn,
+            connection,
             self.player_id,
             self.name,
             session=self.sessions.get(self.player_id),
@@ -150,8 +146,8 @@ class Rig:
     async def close(self) -> None:
         if self.speaker is not None:
             await self.speaker.stop()
-        if self.conn is not None:
-            await self.conn.stop()
+        if self.connection is not None:
+            await self.connection.stop()
         for task in self.tasks:
             task.cancel()
         await self.server.settle()
@@ -160,7 +156,7 @@ class Rig:
         """The user picks this device in the Qobuz app (discovery connect + SET_ACTIVE)."""
         assert self.speaker is not None
         await self.speaker._setup_websocket(tokens or self.tokens)
-        await self.wait_for(lambda: self.ws.is_connected, "Qobuz websocket")
+        await self.wait_for(lambda: self.ws.is_connected, "the Qobuz websocket")
         self._track_handlers()
         await self.deliver(set_active(True))
 
@@ -174,29 +170,27 @@ class Rig:
         assert self.speaker is not None and self.speaker._ws_manager is not None
         return self.speaker._ws_manager
 
-    @property
-    def backend(self) -> MusicAssistantBackend:
-        assert self.speaker is not None and self.speaker._backend is not None
-        return self.speaker._backend  # type: ignore[return-value]
-
     def _track_handlers(self) -> None:
         """Keep the tasks the handlers spawn, so deliver() can wait for them."""
         handlers = self.ws._handlers
-        for msg_type, handler in list(handlers.items()):
+        for key, handler in list(handlers.items()):
             if getattr(handler, "_rig_tracked", False):
                 continue
 
-            def tracked(mt: int, msg: Any, _h: Callable[..., Any] = handler) -> Any:
-                result = _h(mt, msg)
+            def tracked(
+                message_type: int, message: Any, original: Callable[..., Any] = handler
+            ) -> Any:
+                result = original(message_type, message)
                 if isinstance(result, asyncio.Future):
                     self.tasks.append(result)
                 return result
 
             tracked._rig_tracked = True  # type: ignore[attr-defined]
-            handlers[msg_type] = tracked
+            handlers[key] = tracked
 
     async def deliver(self, *messages: Any) -> None:
         """The Qobuz cloud sends one batch to this renderer; wait until it is handled."""
+        assert not self.has_left_qobuz_session(), "the speaker left the Qobuz session"
         batch = pb.QConnectBatch()
         for message in messages:
             batch.messages.append(message)
@@ -227,26 +221,27 @@ class Rig:
         await self.server.settle()
 
     async def play_album(self, index: int = 0) -> None:
-        """The app plays the album from track ``index``; waits until MA plays it."""
+        """The app plays the album from track ``index``; waits until Music Assistant plays it."""
         await self.deliver(album_state(index))
         await self.wait_for(
             lambda: (
                 self.queue_track() == ALBUM[index]
                 and self.queue_state() == MusicAssistantState.PLAYING
             ),
-            f"MA playing {ALBUM[index]}",
+            f"Music Assistant playing {ALBUM[index]}",
         )
 
-    async def play_to_near_end(self, left_s: float = 1.0) -> None:
-        """MA plays on until ``left_s`` before the track's end, and the player has seen it.
+    async def play_to_near_end(self, seconds_left: float = 1.0) -> None:
+        """Music Assistant plays on to ``seconds_left`` before the end, and the player saw it.
 
-        MA sends no position ticks: the player's 0.5 s monitor reads the position, so the
-        backend only knows the track got near its end once a poll ran.
+        Music Assistant sends no position ticks: the player's 0.5 s monitor reads the position,
+        so the backend only knows the track got near its end once a poll ran.
         """
-        elapsed = self.server.queue(self.player_id).corrected_elapsed_time
-        self.server.advance_time(self.player_id, TRACK_S - left_s - elapsed)
+        self.server.advance_time(
+            self.player_id, TRACK_DURATION - seconds_left - self.queue_position()
+        )
         await self.wait_for(
-            lambda: self.player._position_value_ms >= (TRACK_S - left_s - 1) * 1000,
+            lambda: self.player._position_value_ms >= (TRACK_DURATION - seconds_left - 1) * 1000,
             "the player saw the position near the end",
         )
 
@@ -262,7 +257,7 @@ class Rig:
                 and self.player._pending_next_track["trackId"] == track_id
                 and track_id in self.server.track_ids(self.player_id)
             ),
-            f"next track {track_id} queued in MA",
+            f"next track {track_id} queued in Music Assistant",
         )
 
     def app(self) -> tuple[int, int]:
@@ -278,6 +273,11 @@ class Rig:
         """Every playing state the app was shown, from report number ``since`` on."""
         return {report.playingState for report in self.cloud.reports[since:]}
 
+    def shown_queue_items(self) -> list[int]:
+        """The Qobuz queue items the app showed as current, in order, repeats collapsed."""
+        shown = [report.currentQueueItemId for report in self.cloud.reports]
+        return [item for item, _ in groupby(item for item in shown if item)]
+
     def has_left_qobuz_session(self) -> bool:
         """The speaker closed its Qobuz connection, so the app no longer shows it playing."""
         return self.cloud.sockets[-1].closed.is_set()
@@ -291,31 +291,33 @@ class Rig:
     def queue_state(self) -> MusicAssistantState:
         return self.server.queue(self.player_id).state
 
+    def queue_position(self) -> float:
+        """Seconds into the current track in Music Assistant."""
+        return float(self.server.queue(self.player_id).corrected_elapsed_time)
+
     def plays(self) -> list[tuple[str, list[str]]]:
-        """(option, media uris) of every play_media the proxy sent."""
+        """(option, media uris) of every play_media the add-on sent."""
         result = []
         for args in self.server.calls("player_queues/play_media"):
             media = args.get("media")
             result.append((str(args.get("option")), media if isinstance(media, list) else [media]))
         return result
 
+    def volumes_set(self) -> list[int]:
+        """Every volume level the add-on set in Music Assistant."""
+        return [args["volume_level"] for args in self.server.calls("players/cmd/group_volume")]
+
     def writes(self) -> list[str]:
+        """Each command that changes something in Music Assistant, oldest first."""
         return [name for name, _ in self.server.writes]
 
-    async def wait_for(self, cond: Callable[[], Any], what: str, timeout: float = 3.0) -> None:
-        await wait_for(cond, what, server=self.server, timeout=timeout)
+    async def wait_for(self, condition: Callable[[], Any], what: str, timeout: float = 3.0) -> None:
+        await wait_for(condition, what, server=self.server, timeout=timeout)
 
     async def idle(self, seconds: float = 0.3) -> None:
-        """Let real time pass (timers, the player's 0.5 s monitor) with MA events flowing."""
+        """Let real time pass (timers, the player's 0.5 s monitor) with events flowing."""
         await idle(self.server, seconds)
         await self.drain()
-
-
-def make_server() -> FakeMusicAssistantServer:
-    server = FakeMusicAssistantServer()
-    server.add_qobuz_provider()
-    server.add_player(PID, "Kitchen")
-    return server
 
 
 def assert_no_backend_errors(caplog: pytest.LogCaptureFixture) -> None:

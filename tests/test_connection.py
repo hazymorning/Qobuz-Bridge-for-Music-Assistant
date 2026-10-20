@@ -21,8 +21,8 @@ from qobuz_proxy.backends.music_assistant.connection import (
     PlayerInfo,
     login_and_create_token,
 )
-from tests.fake_music_assistant import DROP, HANG, MIN_SCHEMA_VERSION
-from tests.rig import PID, idle, wait_for
+from tests.fake_music_assistant import ADMIN_PASSWORD, DROP, HANG, MIN_SCHEMA_VERSION
+from tests.rig import KITCHEN, idle, wait_for
 
 # Read at import, before the autouse fixture shrinks them for every test
 REAL_RECONNECT_DELAYS = connection_module.RECONNECT_DELAYS_SECONDS
@@ -58,11 +58,11 @@ async def _connect(connection, server) -> None:
 
 
 def _stop(client):
-    return client.player_queues.stop(PID)
+    return client.player_queues.stop(KITCHEN)
 
 
 def _pause(client):
-    return client.player_queues.pause(PID)
+    return client.player_queues.pause(KITCHEN)
 
 
 def _raising(error):
@@ -102,7 +102,7 @@ async def test_status_shows_the_version_and_whether_qobuz_is_a_working_provider(
 
 
 async def test_lists_only_enabled_players_groups_and_stereo_pairs(connection, server):
-    server.add_player("group", "Downstairs", type=PlayerType.GROUP, group_members=[PID])
+    server.add_player("group", "Downstairs", type=PlayerType.GROUP, group_members=[KITCHEN])
     server.add_player("pair", "Living Room", type=PlayerType.STEREO_PAIR, available=False)
     server.add_player("hidden", "Bathroom", hide_in_ui=True)
     await _connect(connection, server)
@@ -116,7 +116,7 @@ async def test_lists_only_enabled_players_groups_and_stereo_pairs(connection, se
     )
 
     assert set(connection.players()) == {
-        PlayerInfo(PID, "Kitchen", "player", available=True, hidden=False),
+        PlayerInfo(KITCHEN, "Kitchen", "player", available=True, hidden=False),
         PlayerInfo("group", "Downstairs", "group", available=True, hidden=False),
         PlayerInfo("pair", "Living Room", "stereo_pair", available=False, hidden=False),
         PlayerInfo("hidden", "Bathroom", "player", available=True, hidden=True),
@@ -126,20 +126,22 @@ async def test_lists_only_enabled_players_groups_and_stereo_pairs(connection, se
 async def test_events_reach_the_listeners_of_their_player_even_when_another_listener_fails(
     connection, server
 ):
+    server.add_player("bedroom", "Bedroom")
     await _connect(connection, server)
     everything, kitchen, bedroom = [], [], []
     # Registered first, so every other listener gets each event after it has failed
     connection.add_event_listener(None, _broken_listener)
     connection.add_event_listener(None, everything.append)
-    connection.add_event_listener(PID, kitchen.append)
+    connection.add_event_listener(KITCHEN, kitchen.append)
     connection.add_event_listener("bedroom", bedroom.append)
 
-    server.start_playing(PID, ["1"])
+    server.start_playing(KITCHEN, ["1"])
+    server.start_playing("bedroom", ["2"])
     await server.settle()
 
-    assert everything and kitchen
-    assert {event.object_id for event in kitchen} == {PID}
-    assert bedroom == []
+    assert {event.object_id for event in everything} == {KITCHEN, "bedroom"}
+    assert kitchen and {event.object_id for event in kitchen} == {KITCHEN}
+    assert bedroom and {event.object_id for event in bedroom} == {"bedroom"}
 
 
 async def test_a_call_passes_music_assistant_errors_and_cancellation_through_and_stays_connected(
@@ -149,7 +151,7 @@ async def test_a_call_passes_music_assistant_errors_and_cancellation_through_and
     server.fail_next["player_queues/play_media"] = MediaNotFoundError("Item 9 not found")
     with pytest.raises(MediaNotFoundError, match="Item 9 not found"):
         await connection.call(
-            "play", lambda client: client.player_queues.play_media(PID, "qobuz://track/9")
+            "play", lambda client: client.player_queues.play_media(KITCHEN, "qobuz://track/9")
         )
 
     server.gate("player_queues/stop")
@@ -207,13 +209,13 @@ async def test_unreachable_music_assistant_is_retried_with_growing_backoff_up_to
     backoff = _record_backoff(monkeypatch)
     messages = []
     connection.add_status_listener(lambda status: messages.append(status.message))
-    server.reachable = False
+    server.set_reachable(False)
     await connection.start()
     await wait_for(lambda: len(backoff) >= 9, "nine retries", server=server)
 
     assert backoff[:9] == [1, 2, 5, 10, 20, 30, 60, 60, 60]
     assert any(server.url in message for message in messages)  # the panel names the address
-    server.reachable = True
+    server.set_reachable(True)
     await wait_for(lambda: connection.is_connected, "connected once reachable", server=server)
 
 
@@ -282,7 +284,7 @@ async def test_a_login_at_a_new_address_reconnects_there_and_disconnecting_forge
     server.aliases.add(new_address)
     tokens_before = set(server.valid_tokens)
 
-    token, name = await login_and_create_token(new_address, "admin", "admin-password")
+    token, name = await login_and_create_token(new_address, "admin", ADMIN_PASSWORD)
     await connection.reconnect(new_address, token)
     await wait_for(lambda: connection.is_connected, "connected at the new address", server=server)
 
@@ -310,7 +312,7 @@ async def test_the_password_and_tokens_never_reach_the_logs(connection, server, 
         )
         with pytest.raises(LoginError) as wrong_password:
             await login_and_create_token(server.url, "admin", "hunter2-typo")
-        token, _ = await login_and_create_token(server.url, "admin", "admin-password")
+        token, _ = await login_and_create_token(server.url, "admin", ADMIN_PASSWORD)
         await connection.reconnect(server.url, token)
         await wait_for(lambda: connection.is_connected, "connected", server=server)
         await connection.call("stop", _stop)
@@ -323,6 +325,6 @@ async def test_the_password_and_tokens_never_reach_the_logs(connection, server, 
 
     assert caplog.text
     assert "hunter2-typo" not in str(wrong_password.value)
-    # "fake-session-token" is the start of every temporary session token the login gets
-    for secret in ("hunter2-typo", "admin-password", "fake-session-token", token):
+    assert len(server.issued_tokens) == 2  # the login's session token and the add-on's own
+    for secret in ("hunter2-typo", ADMIN_PASSWORD, *server.issued_tokens):
         assert secret not in caplog.text

@@ -1,7 +1,8 @@
-"""Fixtures for every test: private settings, fast timers, a fake Music Assistant and the rig."""
+"""Fixtures for every test: private data, fast timers, a fake Music Assistant and the rig."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from pathlib import Path
+from typing import Any, Callable, Optional
 
 import pytest
 
@@ -10,13 +11,17 @@ from qobuz_proxy.backends.music_assistant import connection as connection_module
 from qobuz_proxy.connect import ws_manager
 from qobuz_proxy.playback import state_reporter as state_reporter_module
 from tests.fake_music_assistant import FakeMusicAssistantServer
-from tests.rig import Rig, make_server
+from tests.rig import KITCHEN, Rig
+
+StartSpeaker = Callable[..., Awaitable[Rig]]
 
 
 @pytest.fixture(autouse=True)
-def _isolated_music_assistant_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the app's Music Assistant settings out of the developer's data dir."""
+def _isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep all the add-on's data (Qobuz login, Music Assistant settings) in the test's tmp_path."""
     monkeypatch.setattr("qobuz_proxy.app.CACHE_DIR", tmp_path)
+    monkeypatch.setattr("qobuz_proxy.auth.credentials.CACHE_DIR", tmp_path)
+    monkeypatch.setattr("qobuz_proxy.auth.credentials.CACHE_FILE", tmp_path / "credentials.json")
 
 
 @pytest.fixture(autouse=True)
@@ -32,8 +37,8 @@ def fast_timers(monkeypatch: pytest.MonkeyPatch) -> None:
         "JUMP_WAIT_SECONDS": 0.2,
         "NEXT_ARM_DELAY_SECONDS": 0.0,
         "NEXT_RETRY_COOLDOWN_SECONDS": 0.05,
-        # The fake moves MA's position only with advance_time and does not emulate the
-        # quirks these windows absorb (stale current item after "next"), so keep them tiny.
+        # The fake moves Music Assistant's position only with advance_time and does not emulate
+        # the quirks these windows absorb (stale current item after "next"), so keep them tiny.
         "EXPECT_STATE_SECONDS": 0.5,
         "PROMOTE_SETTLE_SECONDS": 0.1,
         "STALL_CONFIRM_SECONDS": 0.1,
@@ -46,13 +51,17 @@ def fast_timers(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def fast_heartbeat(monkeypatch: pytest.MonkeyPatch) -> None:
-    """State reports every 0.2 s (request it before ``rig``: the reporter reads it per sleep)."""
+    """State reports every 0.2 s."""
     monkeypatch.setattr(state_reporter_module, "STATE_UPDATE_INTERVAL_SECONDS", 0.2)
 
 
 @pytest.fixture
 def server() -> FakeMusicAssistantServer:
-    return make_server()
+    """Music Assistant with Qobuz set up and one player, Kitchen."""
+    server = FakeMusicAssistantServer()
+    server.add_qobuz_provider()
+    server.add_player(KITCHEN, "Kitchen")
+    return server
 
 
 @pytest.fixture
@@ -63,13 +72,31 @@ def fake_login(server: FakeMusicAssistantServer, monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.fixture
-async def rig(
+async def start_speaker(
     server: FakeMusicAssistantServer, monkeypatch: pytest.MonkeyPatch
-) -> AsyncIterator[Rig]:
-    """The Kitchen player, exposed and already picked in the Qobuz app."""
-    rig = await Rig(server, monkeypatch).start()
-    await rig.select()
-    try:
-        yield rig
-    finally:
+) -> AsyncIterator[StartSpeaker]:
+    """Start a player's speaker (Kitchen by default) and pick it in the Qobuz app."""
+    started: list[Rig] = []
+
+    async def start(
+        sessions: Optional[dict[str, dict[str, Any]]] = None,
+        *,
+        player_id: str = KITCHEN,
+        name: str = "Kitchen (MA)",
+        wait_for_music_assistant: bool = True,
+    ) -> Rig:
+        rig = Rig(server, monkeypatch, player_id=player_id, name=name, sessions=sessions)
+        started.append(rig)
+        await rig.start(wait_for_music_assistant=wait_for_music_assistant)
+        await rig.select()
+        return rig
+
+    yield start
+    for rig in started:
         await rig.close()
+
+
+@pytest.fixture
+async def rig(start_speaker: StartSpeaker) -> Rig:
+    """The Kitchen player, exposed and already picked in the Qobuz app."""
+    return await start_speaker()

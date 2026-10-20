@@ -18,14 +18,13 @@ from qobuz_proxy.backends.music_assistant import settings
 from qobuz_proxy.backends.music_assistant.speakers import MusicAssistantSpeakers
 from qobuz_proxy.webui import music_assistant_routes
 from qobuz_proxy.webui.routes import register_routes
-from tests.fake_music_assistant import FakeMusicAssistantServer
-from tests.rig import wait_for
+from tests.fake_music_assistant import ADMIN_PASSWORD, FakeMusicAssistantServer
+from tests.rig import KITCHEN, wait_for
 
 STATUS = "/api/music-assistant/status"
 CONNECT = "/api/music-assistant/connect"
 DISCONNECT = "/api/music-assistant/disconnect"
 PLAYERS = "/api/music-assistant/players"
-PASSWORD = "admin-password"
 
 
 class SilentSpeaker:
@@ -79,14 +78,14 @@ class Panel:
         await self.music_assistant.set_qobuz_logged_in(True)
 
     async def status(self) -> dict[str, Any]:
-        return await ok(await self.client.get(STATUS))
+        return await _ok(await self.client.get(STATUS))
 
     async def connect(self) -> dict[str, Any]:
         """The user enters their Music Assistant login and presses Connect."""
-        return await ok(await self.client.post(CONNECT, json=login_form(self.server)))
+        return await _ok(await self.client.post(CONNECT, json=_login_form(self.server)))
 
     async def choose_players(self, **body: Any) -> dict[str, Any]:
-        return await ok(await self.client.put(PLAYERS, json=body))
+        return await _ok(await self.client.put(PLAYERS, json=body))
 
     async def set_up(self) -> None:
         """Qobuz logged in and Music Assistant connected, so every player is a speaker."""
@@ -97,26 +96,26 @@ class Panel:
         return settings.load(self.settings_path)
 
 
-async def ok(response: ClientResponse) -> dict[str, Any]:
+async def _ok(response: ClientResponse) -> dict[str, Any]:
     assert response.status == 200, await response.text()
     result: dict[str, Any] = await response.json()
     return result
 
 
-def login_form(server: FakeMusicAssistantServer) -> dict[str, str]:
-    return {"url": server.url, "username": "admin", "password": PASSWORD}
+def _login_form(server: FakeMusicAssistantServer) -> dict[str, str]:
+    return {"url": server.url, "username": "admin", "password": ADMIN_PASSWORD}
 
 
-def levels(status: dict[str, Any]) -> str:
+def _levels(status: dict[str, Any]) -> str:
     """The checks as "id:level ...", in the order the panel lists them."""
     return " ".join(f"{check['id']}:{check['level']}" for check in status["checks"])
 
 
-def detail(status: dict[str, Any], check_id: str) -> str:
+def _detail(status: dict[str, Any], check_id: str) -> str:
     return str(next(check["detail"] for check in status["checks"] if check["id"] == check_id))
 
 
-def shown(status: dict[str, Any]) -> dict[str, str]:
+def _shown(status: dict[str, Any]) -> dict[str, str]:
     """The players in the Qobuz app, with the names they show there."""
     return {p["player_id"]: p["speaker_name"] for p in status["players"] if p["speaker_name"]}
 
@@ -148,7 +147,9 @@ async def test_the_page_loads_its_assets_and_has_every_element_its_script_uses(p
         assert (await panel.client.get(f"/{asset}")).status == 200, asset
     assert "{{" not in page
 
-    script = await (await panel.client.get("/static/panel.js")).text()
+    response = await panel.client.get("/static/panel.js")
+    assert response.headers["Cache-Control"] == "no-cache"  # so an update reaches the browser
+    script = await response.text()
     ids = set(re.findall(r'\$\("([\w-]+)"\)', script))
     assert ids
     assert [i for i in sorted(ids) if f'id="{i}"' not in page] == []
@@ -175,55 +176,68 @@ async def test_the_script_calls_routes_that_exist_as_json_and_by_relative_urls(p
 
 def test_the_qobuz_login_link_uses_an_address_of_this_machine():
     address = music_assistant_routes._lan_ip()
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.bind((address, 0))  # refused for an address that is not this machine's
+    if not address:
+        pytest.skip("this machine has no network route")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.bind((address, 0))  # refused for an address that is not this machine's
+
+
+async def test_a_failed_qobuz_login_shows_an_error_in_the_panel(panel):
+    failed = await panel.client.get("/auth/callback", allow_redirects=False)
+    assert failed.headers["Location"].startswith("/?error=")
+
+    # No browser here: the page has the message box and the script reads the error parameter
+    page = await (await panel.client.get("/")).text()
+    script = await (await panel.client.get("/static/panel.js")).text()
+    assert 'id="qobuz-error"' in page
+    assert 'URLSearchParams(window.location.search).get("error")' in script
 
 
 async def test_the_checks_lead_the_user_through_setup_in_order(panel, server):
     status = await panel.status()
-    assert levels(status) == "qobuz:error music_assistant:error speakers:pending"
-    assert "Log in to Qobuz" in detail(status, "qobuz")
+    assert _levels(status) == "qobuz:error music_assistant:error speakers:pending"
+    assert "Log in to Qobuz" in _detail(status, "qobuz")
     # The Qobuz login can't run through Home Assistant, so the panel links the add-on's own port
     assert status["login_url"] == "http://192.168.1.10:8689"
 
     await panel.log_in_to_qobuz()
     status = await panel.status()
-    assert levels(status) == "qobuz:ok music_assistant:error speakers:pending"
+    assert _levels(status) == "qobuz:ok music_assistant:error speakers:pending"
     assert status["qobuz"] == {"logged_in": True, "account": "alice@example.com"}
-    assert detail(status, "qobuz") == "Logged in to Qobuz as alice@example.com."
-    assert "Enter your Music Assistant username and password" in detail(status, "music_assistant")
+    assert _detail(status, "qobuz") == "Logged in to Qobuz as alice@example.com."
+    assert "Enter your Music Assistant username and password" in _detail(status, "music_assistant")
 
     # While Music Assistant is still sending its players, the check waits rather than alarms
     server.gate("players/all")
     connecting = asyncio.create_task(panel.connect())
     await wait_for(lambda: server.calls("players/all"), "the connection to load the players")
     status = await panel.status()
-    assert levels(status) == "qobuz:ok music_assistant:pending speakers:pending"
+    assert _levels(status) == "qobuz:ok music_assistant:pending speakers:pending"
     server.release("players/all")
 
     status = await connecting
-    assert levels(status) == "qobuz:ok music_assistant:ok qobuz_in_music_assistant:ok speakers:ok"
+    assert _levels(status) == "qobuz:ok music_assistant:ok qobuz_in_music_assistant:ok speakers:ok"
     version = server.server_version
-    assert detail(status, "music_assistant") == f"Connected to Music Assistant {version}."
-    assert detail(status, "speakers") == "2 speakers and groups are available in the Qobuz app."
+    assert _detail(status, "music_assistant") == f"Connected to Music Assistant {version}."
+    assert _detail(status, "speakers") == "2 speakers and groups are available in the Qobuz app."
 
     status = await panel.choose_players(expose_all=False)  # and nothing ticked
-    assert levels(status).endswith(" speakers:warn")
-    assert "No speakers are shared with the Qobuz app" in detail(status, "speakers")
+    assert _levels(status).endswith(" speakers:warn")
+    assert "No speakers are shared with the Qobuz app" in _detail(status, "speakers")
 
     # Logged out of Qobuz, the speakers row points back at the Qobuz login
-    await ok(await panel.client.post("/api/auth/logout", json={}))
+    await _ok(await panel.client.post("/api/auth/logout", json={}))
     status = await panel.status()
-    assert levels(status).endswith(" speakers:pending")
-    assert "once Qobuz and Music Assistant are both connected" in detail(status, "speakers")
+    assert _levels(status).endswith(" speakers:pending")
+    assert "once Qobuz and Music Assistant are both connected" in _detail(status, "speakers")
 
 
 async def test_the_checks_say_what_to_fix_in_music_assistant(panel, server):
     server.add_qobuz_provider(available=False)  # its Qobuz provider failed to load
     await panel.set_up()
     status = await panel.status()
-    assert "qobuz_in_music_assistant:error" in levels(status)
-    assert "add Qobuz" in detail(status, "qobuz_in_music_assistant")
+    assert "qobuz_in_music_assistant:error" in _levels(status)
+    assert "add Qobuz" in _detail(status, "qobuz_in_music_assistant")
 
     server.revoke_token(panel.saved().token)
     await wait_for(
@@ -232,20 +246,20 @@ async def test_the_checks_say_what_to_fix_in_music_assistant(panel, server):
         server=server,
     )
     status = await panel.status()
-    assert levels(status) == "qobuz:ok music_assistant:error speakers:ok"
-    assert "Connect again in this panel" in detail(status, "music_assistant")
+    assert _levels(status) == "qobuz:ok music_assistant:error speakers:ok"
+    assert "Connect again in this panel" in _detail(status, "music_assistant")
 
 
 async def test_connecting_keeps_the_login_secret_and_disconnecting_forgets_it(panel, server):
     await panel.log_in_to_qobuz()
-    response = await panel.client.post(CONNECT, json=login_form(server))
+    response = await panel.client.post(CONNECT, json=_login_form(server))
     answer = await response.text()
     assert response.status == 200
     assert json.loads(answer)["speaker_count"] == 2
     token = panel.saved().token
     assert token in server.valid_tokens
     for text in (answer, await (await panel.client.get(STATUS)).text()):
-        assert token not in text and PASSWORD not in text
+        assert token not in text and ADMIN_PASSWORD not in text
 
     response = await panel.client.post(DISCONNECT, json={})
     assert response.status == 200
@@ -255,7 +269,7 @@ async def test_connecting_keeps_the_login_secret_and_disconnecting_forgets_it(pa
 
 
 async def test_a_wrong_password_is_refused_with_a_plain_message(panel, server):
-    response = await panel.client.post(CONNECT, json={**login_form(server), "password": "nope"})
+    response = await panel.client.post(CONNECT, json={**_login_form(server), "password": "nope"})
 
     assert response.status == 400
     error = (await response.json())["error"]
@@ -272,22 +286,22 @@ async def test_a_partial_player_choice_is_applied_saved_and_keeps_the_other_sett
 
     # Switching "all" off then leaves just the ticked player in the Qobuz app
     status = await panel.choose_players(expose_all=False)
-    assert shown(status) == {"up2": "Living Room (MA)"}
+    assert _shown(status) == {"up2": "Living Room (MA)"}
     assert status["speaker_count"] == 1
 
     # From then on a tick swaps the speaker, and "all" stays off
-    status = await panel.choose_players(selected=["up1"])
+    status = await panel.choose_players(selected=[KITCHEN])
     assert status["expose_all"] is False
-    assert shown(status) == {"up1": "Kitchen (MA)"}
+    assert _shown(status) == {KITCHEN: "Kitchen (MA)"}
     assert status["speaker_count"] == 1
     saved = panel.saved()
-    assert (saved.expose_all, saved.selected_player_ids) == (False, ["up1"])
+    assert (saved.expose_all, saved.selected_player_ids) == (False, [KITCHEN])
 
 
 async def test_malformed_requests_are_refused_and_change_nothing(panel, server):
     await panel.set_up()
     before = panel.settings_path.read_text()
-    good = login_form(server)
+    good = _login_form(server)
     cases: list[tuple[str, str, Any, str]] = [
         ("POST", CONNECT, "{not json", "Invalid request."),
         ("PUT", PLAYERS, "[1, 2]", "Invalid request."),

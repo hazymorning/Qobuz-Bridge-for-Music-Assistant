@@ -12,18 +12,21 @@ from typing import Any, Callable, Optional
 
 import websockets
 
-from qobuz_proxy.connect.protocol import MessageType, ProtocolCodec
+from qobuz_proxy.connect.protocol import MessageType, ProtocolCodec, QConnectMessageType
 from qobuz_proxy.connect.types import ConnectTokens, JWTConnectToken
 from qobuz_proxy.playback.metadata import TrackMetadata
 from qobuz_proxy.proto import qconnect_common_pb2 as common_pb
 from qobuz_proxy.proto import qconnect_payload_pb2 as pb
+from tests.fake_music_assistant import TRACK_DURATION
 
 ALBUM = ["101", "102", "103"]
-TRACK_S = 200  # FakeMusicAssistantServer's default track length
 
-# Wire playing states as the Qobuz app sees them
-APP_STOPPED, APP_PLAYING, APP_PAUSED = 1, 2, 3
+# Playing states as the Qobuz app sees them
+APP_STOPPED = common_pb.PLAYING_STATE_STOPPED
+APP_PLAYING = common_pb.PLAYING_STATE_PLAYING
+APP_PAUSED = common_pb.PLAYING_STATE_PAUSED
 ACTION_NEXT = 2  # RndrSrvrRendererAction.action
+SRVR_CTRL_VOLUME_CHANGED = 87  # not in QConnectMessageType
 
 
 def uri(track_id: str) -> str:
@@ -50,7 +53,7 @@ class StubMetadata:
             title=f"Song {track_id}",
             artist="Artist",
             album="Album",
-            duration_ms=TRACK_S * 1000,
+            duration_ms=TRACK_DURATION * 1000,
             actual_quality=27,
         )
 
@@ -71,10 +74,10 @@ class StubMetadata:
 
 
 class StubDiscovery:
-    """mDNS + discovery HTTP endpoints (not needed: the app 'connects' via _setup_websocket)."""
+    """mDNS and the discovery endpoints (not needed: the app 'connects' via _setup_websocket)."""
 
-    def __init__(self, config: Any, app_id: str, **kwargs: Any) -> None:
-        self.cleared = 0
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        pass
 
     async def start(self) -> None:
         pass
@@ -86,7 +89,7 @@ class StubDiscovery:
         pass
 
     def clear_session(self) -> None:
-        self.cleared += 1
+        pass
 
 
 class CloudSocket:
@@ -128,15 +131,14 @@ class QobuzCloud:
         self.reports: list[Any] = []
         self.actions: list[int] = []
         self.volumes: list[int] = []
-        self.album: list[str] = list(ALBUM)
-        self.current_qid = 0
-        self._answered_qid = 0
+        self._current_queue_item_id = 0
+        self._answered_queue_item_id = 0
         self.deliver: Optional[Callable[..., Any]] = None  # set by the rig
 
     def connect(self, *args: Any, **kwargs: Any) -> CloudSocket:
-        sock = CloudSocket(self)
-        self.sockets.append(sock)
-        return sock
+        socket = CloudSocket(self)
+        self.sockets.append(socket)
+        return socket
 
     def receive(self, frame: bytes) -> None:
         decoded = self.codec.decode_frame(frame)
@@ -144,44 +146,41 @@ class QobuzCloud:
             return  # AUTHENTICATE / SUBSCRIBE
         batch = self.codec.decode_qconnect_batch(decoded.payload)
         assert batch is not None
-        for msg in batch.messages:
-            if msg.messageType == 23:
+        for message in batch.messages:
+            if message.messageType == QConnectMessageType.RNDR_SRVR_STATE_UPDATED:
                 state = common_pb.QueueRendererState()
-                state.CopyFrom(msg.rndrSrvrStateUpdated.state)
+                state.CopyFrom(message.rndrSrvrStateUpdated.state)
                 self.reports.append(state)
                 self._on_report(state)
-            elif msg.messageType == 24:
-                self.actions.append(msg.rndrSrvrRendererAction.action)
-                if msg.rndrSrvrRendererAction.action == ACTION_NEXT:
+            elif message.messageType == QConnectMessageType.RNDR_SRVR_RENDERER_ACTION:
+                self.actions.append(message.rndrSrvrRendererAction.action)
+                if message.rndrSrvrRendererAction.action == ACTION_NEXT:
                     self._on_next()
-            elif msg.messageType == 25:
-                self.volumes.append(msg.rndrSrvrVolumeChanged.volume)
+            elif message.messageType == QConnectMessageType.RNDR_SRVR_VOLUME_CHANGED:
+                self.volumes.append(message.rndrSrvrVolumeChanged.volume)
 
     def _on_report(self, state: Any) -> None:
-        queue_id = state.currentQueueItemId
-        if not queue_id:
+        # Queue item id n is album track n, at index n - 1
+        queue_item_id = state.currentQueueItemId
+        if not queue_item_id:
             return
-        self.current_qid = queue_id
-        if queue_id == self._answered_qid or self.deliver is None:
+        self._current_queue_item_id = queue_item_id
+        if queue_item_id == self._answered_queue_item_id or self.deliver is None:
             return
-        self._answered_qid = queue_id
-        if queue_id < len(self.album):
-            self.deliver(set_state(next_track=(self.album[queue_id], queue_id + 1)))
+        self._answered_queue_item_id = queue_item_id
+        if queue_item_id < len(ALBUM):
+            self.deliver(set_state(next_track=(ALBUM[queue_item_id], queue_item_id + 1)))
 
     def _on_next(self) -> None:
-        index = self.current_qid  # queue item id n is album index n - 1
-        if self.deliver is None or index >= len(self.album):
-            return
-        nxt = (self.album[index + 1], index + 2) if index + 1 < len(self.album) else None
-        self.deliver(
-            set_state(APP_PLAYING, track=(self.album[index], index + 1), next_track=nxt, pos=0)
-        )
+        next_index = self._current_queue_item_id
+        if self.deliver is not None and next_index < len(ALBUM):
+            self.deliver(album_state(next_index))
 
 
 def set_active(active: bool) -> Any:
-    msg = pb.QConnectMessage(messageType=43)
-    msg.srvrRndrSetActive.active = active
-    return msg
+    message = pb.QConnectMessage(messageType=QConnectMessageType.SRVR_RNDR_SET_ACTIVE)
+    message.srvrRndrSetActive.active = active
+    return message
 
 
 def set_state(
@@ -192,8 +191,8 @@ def set_state(
     pos: Optional[int] = None,
 ) -> Any:
     """SrvrRndrSetState like the app sends it (track = (track_id, queue_item_id))."""
-    msg = pb.QConnectMessage(messageType=41)
-    state = msg.srvrRndrSetState
+    message = pb.QConnectMessage(messageType=QConnectMessageType.SRVR_RNDR_SET_STATE)
+    state = message.srvrRndrSetState
     state.queueVersion.major = 1
     state.queueVersion.minor = 0
     if playing_state is not None:
@@ -206,23 +205,37 @@ def set_state(
     if next_track is not None:
         state.nextQueueItem.trackId = int(next_track[0])
         state.nextQueueItem.queueItemId = next_track[1]
-    return msg
+    return message
 
 
 def set_volume(level: int) -> Any:
-    msg = pb.QConnectMessage(messageType=42)
-    msg.srvrRndrSetVolume.volume = level
-    return msg
+    message = pb.QConnectMessage(messageType=QConnectMessageType.SRVR_RNDR_SET_VOLUME)
+    message.srvrRndrSetVolume.volume = level
+    return message
+
+
+def volume_broadcast(level: int) -> Any:
+    """The cloud telling every device in the session that the volume changed (no renderer id)."""
+    message = pb.QConnectMessage(messageType=SRVR_CTRL_VOLUME_CHANGED)
+    message.srvrCtrlVolumeChanged.volume = level
+    return message
+
+
+def set_max_quality(level: int) -> Any:
+    message = pb.QConnectMessage(messageType=QConnectMessageType.SRVR_RNDR_SET_MAX_AUDIO_QUALITY)
+    message.srvrRndrSetMaxAudioQuality.maxAudioQuality = level
+    return message
 
 
 def album_state(index: int, playing_state: int = APP_PLAYING, pos: int = 0) -> Any:
     """The app's SET_STATE for album track ``index`` (queue item id index + 1)."""
-    nxt = (ALBUM[index + 1], index + 2) if index + 1 < len(ALBUM) else None
-    return set_state(playing_state, track=(ALBUM[index], index + 1), next_track=nxt, pos=pos)
+    next_track = (ALBUM[index + 1], index + 2) if index + 1 < len(ALBUM) else None
+    return set_state(playing_state, track=(ALBUM[index], index + 1), next_track=next_track, pos=pos)
 
 
-def make_tokens() -> ConnectTokens:
+def make_tokens(session_id: Optional[str] = None, jwt: str = "test-jwt") -> ConnectTokens:
+    """What the app hands the speaker when it picks it (a new session unless one is given)."""
     return ConnectTokens(
-        session_id=str(uuid.uuid4()),
-        ws_token=JWTConnectToken(jwt="test-jwt", exp=9_999_999_999, endpoint="wss://qobuz.test/ws"),
+        session_id=session_id or str(uuid.uuid4()),
+        ws_token=JWTConnectToken(jwt=jwt, exp=9_999_999_999, endpoint="wss://qobuz.test/ws"),
     )

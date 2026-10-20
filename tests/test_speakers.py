@@ -22,10 +22,10 @@ from qobuz_proxy.backends.music_assistant.backend import MusicAssistantBackend
 from qobuz_proxy.backends.music_assistant.settings import Settings
 from qobuz_proxy.backends.music_assistant.speakers import MusicAssistantSpeakers
 from qobuz_proxy.config import SpeakerConfig
-from tests.fake_music_assistant import FakeMusicAssistantServer
-from tests.rig import idle, wait_for
+from tests.fake_music_assistant import ADMIN_PASSWORD, FakeMusicAssistantServer
+from tests.rig import KITCHEN, idle, wait_for
 
-EXPOSED = {"up1", "group", "pair"}
+EXPOSED = {KITCHEN, "group", "pair"}
 BIND_ADDRESS = "192.0.2.10"  # the address the add-on is set to listen on
 KITCHEN_UUID = "b4775f8a-b4c8-517a-a942-d6239961083d"  # must never change: the app knows it
 SESSION = {"current": {"item_id": "qi1", "track_id": "101"}, "armed": None}
@@ -112,8 +112,8 @@ class AddOn:
     def saved(self) -> Settings:
         return settings.load(self.path)
 
-    async def wait_for(self, cond: Callable[[], Any], what: str) -> None:
-        await wait_for(cond, what, server=self.server)
+    async def wait_for(self, condition: Callable[[], Any], what: str) -> None:
+        await wait_for(condition, what, server=self.server)
 
     async def wait_until_listed(self, player_ids: set[str]) -> None:
         await self.wait_for(lambda: set(self.listed()) == player_ids, f"{sorted(player_ids)}")
@@ -125,7 +125,7 @@ class AddOn:
 @pytest.fixture
 def server(server: FakeMusicAssistantServer) -> FakeMusicAssistantServer:
     """Kitchen, a group, a stereo pair, and three players the app must never list."""
-    server.add_player("group", "Downstairs", type=PlayerType.GROUP, group_members=["up1"])
+    server.add_player("group", "Downstairs", type=PlayerType.GROUP, group_members=[KITCHEN])
     server.add_player("pair", "Bedroom pair", type=PlayerType.STEREO_PAIR)
     server.add_player("hidden", "Hidden speaker", hide_in_ui=True)
     server.add_player("disabled", "Disabled speaker", enabled=False)
@@ -148,7 +148,7 @@ async def add_on(
         await add_on.stop()
 
 
-def panel_row(music_assistant: MusicAssistantSpeakers, player_id: str) -> dict[str, Any]:
+def _panel_row(music_assistant: MusicAssistantSpeakers, player_id: str) -> dict[str, Any]:
     rows = music_assistant.status()["players"]
     return next(row for row in rows if row["player_id"] == player_id)
 
@@ -162,12 +162,12 @@ async def test_every_visible_player_group_and_stereo_pair_appears_in_the_app_und
     await add_on.wait_until_listed(EXPOSED | {"up2"})
 
     assert add_on.listed() == {
-        "up1": "Kitchen (MA)",
+        KITCHEN: "Kitchen (MA)",
         "up2": "kitchen (MA) 2",
         "group": "Downstairs (MA)",
         "pair": "Bedroom pair (MA)",
     }
-    kitchen = add_on.speaker("up1").config
+    kitchen = add_on.speaker(KITCHEN).config
     # Music Assistant reports plays to Qobuz itself; its kind of speaker does not do it again
     assert (kitchen.backend_type, kitchen.bind_address) == ("music_assistant", BIND_ADDRESS)
     # The panel lists the hidden player too, so it can be ticked; never the disabled one or
@@ -183,7 +183,7 @@ async def test_every_visible_player_group_and_stereo_pair_appears_in_the_app_und
     assert all(p["available"] for p in rows)
 
     server.update_player("pair", available=False)  # powered off: the panel marks it offline
-    await add_on.wait_for(lambda: not panel_row(music_assistant, "pair")["available"], "offline")
+    await add_on.wait_for(lambda: not _panel_row(music_assistant, "pair")["available"], "offline")
 
 
 async def test_ticked_players_are_the_only_ones_in_the_app_and_stay_ticked(add_on):
@@ -214,11 +214,11 @@ async def test_speakers_appear_only_while_qobuz_is_logged_in(add_on):
 
     await music_assistant.set_qobuz_logged_in(True)
     assert set(add_on.listed()) == EXPOSED
-    kitchen = add_on.speaker("up1")
+    kitchen = add_on.speaker(KITCHEN)
 
     # Another Qobuz login: the speakers are built again for the new account
     await music_assistant.set_qobuz_logged_in(True, restart=True)
-    assert set(add_on.listed()) == EXPOSED and add_on.speaker("up1") is not kitchen
+    assert set(add_on.listed()) == EXPOSED and add_on.speaker(KITCHEN) is not kitchen
 
     await music_assistant.set_qobuz_logged_in(False)
     assert add_on.listed() == {}
@@ -227,21 +227,21 @@ async def test_speakers_appear_only_while_qobuz_is_logged_in(add_on):
 async def test_a_renamed_player_keeps_its_speaker_and_waits_until_the_music_stops(server, add_on):
     await add_on.start()
     await add_on.wait_until_listed(EXPOSED)
-    kitchen = add_on.speaker("up1")
+    kitchen = add_on.speaker(KITCHEN)
     kitchen.status = "playing"
 
-    server.update_player("up1", name="Cuisine")
+    server.update_player(KITCHEN, name="Cuisine")
     await add_on.idle(0.1)
     kitchen.status = "paused"
     server.set_player_volume("group", 20)  # any Music Assistant event checks the names again
     await add_on.idle(0.1)
-    assert add_on.speaker("up1") is kitchen  # a rename restarts the speaker: not mid-song
-    assert add_on.listed()["up1"] == "Kitchen (MA)"
+    assert add_on.speaker(KITCHEN) is kitchen  # a rename restarts the speaker: not mid-song
+    assert add_on.listed()[KITCHEN] == "Kitchen (MA)"
 
     kitchen.status = "idle"
     server.set_player_volume("group", 21)
-    await add_on.wait_for(lambda: add_on.listed().get("up1") == "Cuisine (MA)", "the new name")
-    renamed = add_on.speaker("up1").config
+    await add_on.wait_for(lambda: add_on.listed().get(KITCHEN) == "Cuisine (MA)", "the new name")
+    renamed = add_on.speaker(KITCHEN).config
     assert (renamed.uuid, renamed.http_port) == (KITCHEN_UUID, kitchen.config.http_port)
 
 
@@ -250,10 +250,10 @@ async def test_after_a_restart_each_speaker_keeps_its_port_and_session(server, a
     await add_on.start()
     await add_on.wait_until_listed(EXPOSED)
     ports = add_on.ports()
-    assert ports == {"up1": 8700, "group": 8702, "pair": 8703}
+    assert ports == {KITCHEN: 8700, "group": 8702, "pair": 8703}
     # What the backend saves as it plays (playing for real would need the whole Qobuz side)
-    add_on.speaker("up1").backend._save_session_callback(SESSION)
-    assert add_on.saved().sessions == {"up1": SESSION}
+    add_on.speaker(KITCHEN).backend._save_session_callback(SESSION)
+    assert add_on.saved().sessions == {KITCHEN: SESSION}
     await add_on.stop()
 
     # On the next start those ports are taken for a moment, and a new player turned up
@@ -263,7 +263,7 @@ async def test_after_a_restart_each_speaker_keeps_its_port_and_session(server, a
     await add_on.wait_until_listed(EXPOSED | {"up3"})
 
     assert add_on.ports() == {**ports, "up3": 8701}  # free again, and no known player has it
-    assert add_on.speaker("up1").backend._saved_session == SESSION
+    assert add_on.speaker(KITCHEN).backend._saved_session == SESSION
     assert add_on.speaker("group").backend._saved_session is None
 
 
@@ -274,7 +274,7 @@ async def test_known_players_stay_in_the_app_while_music_assistant_is_down(
     monkeypatch.setattr(speakers_module, "MISSING_PLAYER_GRACE_SECONDS", 0.05)
     # As an earlier run (of an older version, with a setting that is gone now) saved it
     known = {
-        "up1": {"name": "Kitchen", "player_type": "player", "http_port": 8700},
+        KITCHEN: {"name": "Kitchen", "player_type": "player", "http_port": 8700},
         "group": {"name": "Downstairs", "player_type": "group", "http_port": 8701},
         "hidden": {"name": "Hidden", "player_type": "player", "http_port": 8702, "hidden": True},
     }
@@ -283,14 +283,14 @@ async def test_known_players_stay_in_the_app_while_music_assistant_is_down(
     server.set_reachable(False)
 
     music_assistant = await add_on.start()
-    assert add_on.ports() == {"up1": 8700, "group": 8701}
+    assert add_on.ports() == {KITCHEN: 8700, "group": 8701}
     await add_on.idle(0.15)  # many failed reconnects later
-    assert add_on.listed() == {"up1": "Kitchen (MA)", "group": "Downstairs (MA)"}
-    assert panel_row(music_assistant, "up1")["available"] is False
+    assert add_on.listed() == {KITCHEN: "Kitchen (MA)", "group": "Downstairs (MA)"}
+    assert _panel_row(music_assistant, KITCHEN)["available"] is False
 
     server.set_reachable(True)  # the same speakers stay, the rest join
     await add_on.wait_until_listed(EXPOSED)
-    assert add_on.starts.count("up1") == 1
+    assert add_on.starts.count(KITCHEN) == 1
 
 
 async def test_a_player_removed_from_music_assistant_stays_for_a_grace_period_then_is_forgotten(
@@ -304,11 +304,11 @@ async def test_a_player_removed_from_music_assistant_stays_for_a_grace_period_th
     server.remove_player("pair")
     await add_on.idle(0.05)
     assert "pair" in add_on.listed()  # Music Assistant may just be registering it again
-    assert panel_row(music_assistant, "pair")["available"] is False
+    assert _panel_row(music_assistant, "pair")["available"] is False
 
     await add_on.idle(0.3)
-    server.set_player_volume("up1", 25)  # any later Music Assistant event checks again
-    await add_on.wait_until_listed({"up1", "group"})
+    server.set_player_volume(KITCHEN, 25)  # any later Music Assistant event checks again
+    await add_on.wait_until_listed({KITCHEN, "group"})
     saved = add_on.saved()
     assert "pair" not in saved.known_players and "pair" not in saved.sessions
 
@@ -317,7 +317,7 @@ async def test_a_speaker_that_fails_to_start_is_retried_and_never_doubled(
     server, add_on, monkeypatch
 ):
     monkeypatch.setattr(speakers_module, "START_RETRY_DELAYS_SECONDS", (0.5, 0.05))
-    add_on.failing_starts.update(up1=2, pair=1)  # e.g. its port is still taken
+    add_on.failing_starts.update({KITCHEN: 2, "pair": 1})  # e.g. its port is still taken
     music_assistant = await add_on.start()
     await add_on.wait_until_listed({"group"})
     assert music_assistant.status()["speaker_count"] == 1  # the panel counts running ones
@@ -327,13 +327,13 @@ async def test_a_speaker_that_fails_to_start_is_retried_and_never_doubled(
         server.set_player_volume("group", level)
         await add_on.idle(0.03)
     await music_assistant.update_speakers()
-    assert add_on.starts.count("up1") == 1
+    assert add_on.starts.count(KITCHEN) == 1
 
     # The pair is unticked while its retry waits: it must not turn up in the app later
-    await music_assistant.set_exposed_players(expose_all=False, selected=["up1", "group"])
-    await add_on.wait_until_listed({"up1", "group"})
+    await music_assistant.set_exposed_players(expose_all=False, selected=[KITCHEN, "group"])
+    await add_on.wait_until_listed({KITCHEN, "group"})
     await add_on.idle(0.2)
-    assert add_on.starts.count("up1") == 3  # two failures, then it runs
+    assert add_on.starts.count(KITCHEN) == 3  # two failures, then it runs
     assert add_on.starts.count("pair") == 1
 
 
@@ -342,7 +342,7 @@ async def test_connecting_saves_a_new_token_and_disconnecting_forgets_it(server,
     music_assistant = await add_on.start()
     assert music_assistant.status()["is_configured"] is False
 
-    await music_assistant.connect(" 127.0.0.1:8095// ", " admin ", "admin-password")  # as typed
+    await music_assistant.connect(" 127.0.0.1:8095// ", " admin ", ADMIN_PASSWORD)  # as typed
 
     saved = add_on.saved()
     assert saved.token in server.valid_tokens and saved.token != server.token
@@ -370,7 +370,7 @@ async def test_connecting_saves_a_new_token_and_disconnecting_forgets_it(server,
     assert music_assistant.status()["is_configured"] is False
 
     # Connecting again, with every player already known: the new token is saved too
-    await music_assistant.connect(server.url, "admin", "admin-password")
+    await music_assistant.connect(server.url, "admin", ADMIN_PASSWORD)
     assert add_on.saved().token in server.valid_tokens
     assert add_on.listed() == {"group": "Downstairs (MA)"}
 
@@ -391,7 +391,7 @@ async def test_login_problems_come_back_as_plain_messages_and_save_nothing(serve
     assert "did not accept that username and password" in message and "typo" not in message
     assert "is a guest" in await problem("visitor", "visitor-password")
     server.setup_required = True
-    assert "not set up yet" in await problem(password="admin-password")
+    assert "not set up yet" in await problem(password=ADMIN_PASSWORD)
     server.set_reachable(False)
     # An empty address means Music Assistant's usual one
     assert "Can't reach Music Assistant at http://127.0.0.1:8095" in await problem(url="")
@@ -416,6 +416,10 @@ def test_a_failed_save_keeps_the_previous_settings_file(tmp_path, monkeypatch):
 def test_a_missing_or_unreadable_settings_file_gives_the_defaults(tmp_path):
     path = tmp_path / "music_assistant.json"
     assert settings.load(path) == Settings()
-    for content in ["{not json", '["url"]', '{"known_players": {"up1": {"name": "K"}}}']:
+    for content in [
+        "{not json",
+        '["url"]',
+        json.dumps({"known_players": {KITCHEN: {"name": "K"}}}),
+    ]:
         path.write_text(content)
         assert settings.load(path) == Settings(), content
