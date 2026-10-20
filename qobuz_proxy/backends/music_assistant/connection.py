@@ -43,7 +43,7 @@ PLAYER_TYPES = {
     PlayerType.STEREO_PAIR: "stereo_pair",
     PlayerType.GROUP: "group",
 }
-TOKEN_NAME = "Qobuz Bridge"
+TOKEN_NAME = "MA Qobuz Bridge"
 RECONNECT_DELAYS_SECONDS = (1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0)
 CONNECT_TIMEOUT_SECONDS = 15.0
 LOAD_TIMEOUT_SECONDS = 30.0

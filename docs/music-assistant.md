@@ -80,13 +80,13 @@ Keep these when changing the backend:
 
 ## Tests
 
-- `tests/backends/fake_music_assistant.py`: an in-memory MA 2.10.7 server driving the real
-  `music-assistant-client` (only the websocket is fake). Time only moves with `advance_time`, and
-  `settle()` never sleeps, so tests patch the backend's timing constants.
-- `tests/integration/test_music_assistant_scenarios.py`: the full stack (real `Speaker`,
-  `WsManager`, command handlers, QobuzPlayer) for each user-facing behaviour.
-- `tests/backends/test_music_assistant_*.py`, `tests/test_music_assistant_speakers.py`,
-  `tests/webui/test_music_assistant_routes.py`: units and the panel API.
+`tests/fake_music_assistant.py` is an in-memory Music Assistant 2.10.7 server that drives the real
+`music-assistant-client` (only the websocket is fake). Time only moves with `advance_time`, and
+`settle()` never sleeps, so `tests/conftest.py` shrinks the backend's timing constants.
+`tests/rig.py` wires one player like production, from the Qobuz websocket down. The test files
+are named after what they cover: `test_qobuz_app.py`, `test_music_assistant_ui.py`,
+`test_recovery.py`, `test_connection.py`, `test_speakers.py`, `test_panel.py` and
+`test_upstream_changes.py` (the hooks above).
 
 ## Add-on packaging
 

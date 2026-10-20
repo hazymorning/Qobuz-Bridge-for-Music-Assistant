@@ -645,7 +645,7 @@ class TestLoginAndCreateToken:
 
         assert name == "admin"
         assert token in server.valid_tokens
-        assert server.calls("auth/token/create") == [{"name": "Qobuz Bridge", "user_id": None}]
+        assert server.calls("auth/token/create") == [{"name": "MA Qobuz Bridge", "user_id": None}]
         conn = MusicAssistantConnection(server.url, token, client_factory=server.client_factory)
         await connected(conn, server)
         await conn.stop()

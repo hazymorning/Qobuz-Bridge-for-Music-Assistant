@@ -419,7 +419,7 @@ class FakeMusicAssistantServer:
         self._commands: dict[str, Callable[..., Any]] = self._build_command_table()
         self._signatures = {name: inspect.signature(fn) for name, fn in self._commands.items()}
         if token:
-            self._register_token(token, "admin", "Qobuz Bridge", long_lived=True)
+            self._register_token(token, "admin", "MA Qobuz Bridge", long_lived=True)
 
     @property
     def client_class(self) -> type[FakeMusicAssistantClient]:

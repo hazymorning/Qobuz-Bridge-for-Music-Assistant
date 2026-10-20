@@ -287,7 +287,7 @@ async def test_logging_in_at_a_new_address_reconnects_there_with_a_long_lived_to
     await wait_for(lambda: connection.is_connected, "connected at the new address", server=server)
 
     assert name == "admin"
-    assert server.calls("auth/token/create") == [{"name": "Qobuz Bridge", "user_id": None}]
+    assert server.calls("auth/token/create") == [{"name": "MA Qobuz Bridge", "user_id": None}]
     assert server.valid_tokens == tokens_before | {token}  # the login's session token is revoked
     assert [(client.server_url, client.connection.auth_token) for client in server.clients] == [
         (new_address, token)
