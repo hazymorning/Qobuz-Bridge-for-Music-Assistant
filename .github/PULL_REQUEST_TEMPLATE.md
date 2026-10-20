@@ -1,25 +1,11 @@
-<!-- Thanks for contributing! A quick look at CONTRIBUTING.md before you open this helps a lot.
-     The short version: one change per PR, no version bump, and tell us how you tested it. -->
+## What and why
 
-## Problem
-
-<!-- What was wrong, from the user's point of view? Link the issue if there is one. -->
-
-Fixes #
-
-## What changed
-
-<!-- The behavior change, in a few sentences. No need to list every file. -->
+<!-- What was wrong or missing, from the user's point of view, and what changes. Link the issue if there is one. -->
 
 ## How it was tested
 
-<!-- Which speaker or audio device, which Qobuz app (iOS, Android, desktop), and what you did.
-     Something like: "Sonos One + iOS app, skipped through a 20-track playlist twice, no stalls." -->
+<!-- Which speaker or group in Music Assistant, which Qobuz app, and what you did. -->
 
-- [ ] Tested on a real speaker or audio device (described above)
-- [ ] `uv run pytest`, `ruff format`, `ruff check`, and `mypy` are clean
-- [ ] New or changed behavior has tests
-- [ ] This PR does one thing, and the version wasn't bumped
-
-<!-- If you couldn't test on hardware, that's okay, just leave the box unchecked and say why. -->
-
+- [ ] `uv run pytest`, `ruff format`, `ruff check` and `mypy` are clean
+- [ ] Tried on a real speaker through Music Assistant (or say why not)
+- [ ] User-visible change: `CHANGELOG.md` entry and `version` bumped in `config.json`

@@ -1,101 +1,72 @@
-# Contributing to QobuzProxy
+# Working on Qobuz Bridge
 
-Thanks for helping! This is a small project maintained in spare time, and
-most testing means sitting in front of a real speaker with the Qobuz app
-open. The guidelines below are here so a change can be understood, tested,
-and released quickly. None of them are meant to be gatekeeping, they just
-make the review a lot easier for everyone.
+The add-on is upstream [QobuzProxy](https://github.com/leolobato/qobuz-proxy) plus a Music
+Assistant backend, a panel and the Home Assistant packaging. How the bridge works is in
+[docs/music-assistant.md](docs/music-assistant.md).
 
-## One PR, one change
+## Set up and check
 
-A pull request fixes one bug or adds one feature. If you find yourself
-writing "also", "additionally", or "while I was there" in the description,
-split it.
-
-Concretely:
-
-- A PR that adds a feature does not also fix unrelated bugs, even small ones.
-  Open a second PR for the fix. Small fixes are cheap to review on their own
-  and can be merged and released immediately.
-- A PR that fixes a bug does not also refactor, rename, or reformat code it
-  did not need to touch.
-- A PR that changes the Web UI does not also change the playback engine,
-  unless the UI change is impossible without it. If it is, say so in the
-  description and keep the engine change minimal.
-- If two changes are independent, they are two PRs. If one depends on the
-  other, open the dependency first and mention it in the second PR.
-
-A good rule of thumb: if a reviewer could reasonably want to merge half of
-the PR and reject the other half, it should have been two PRs. See Google's
-[Small CLs](https://google.github.io/eng-practices/review/developer/small-cls.html)
-guide for the reasoning.
-
-Large changes that touch the player state machine, the Connect protocol, or
-the backends are welcome, but **open an issue first** describing the problem
-and the approach. This avoids you spending a weekend on something that
-conflicts with work in progress or with how the project is meant to evolve.
-
-## What the maintainer owns
-
-Please leave these out of your PR. They are handled by the maintainer at
-release time, and including them creates conflicts with every other open PR:
-
-- The `version` field in `pyproject.toml` and the matching line in `uv.lock`
-- Release tags and GitHub releases
-- Changes to `.github/workflows/`
-- `uv.lock` changes, unless the PR adds or updates a dependency (use
-  `uv add` / `uv remove` so the lock file and `pyproject.toml` change
-  together, and say why the dependency is needed)
-
-Releases are cut by tagging `main`. A merged PR ships in the next release;
-there is nothing you need to do to make that happen.
-
-## Describe the problem, not just the code
-
-The PR description should answer, in this order:
-
-1. **What was wrong** from the user's point of view. "Skipping a track in the
-   Qobuz app snaps the UI back to the previous song for two seconds" is a
-   problem. "Refactor SET_STATE handling" is not.
-2. **Why it happened**, briefly, if you know.
-3. **What changed** in behavior. Not a list of functions edited.
-4. **How you tested it**, with the actual hardware. Name the renderer model
-   or audio device, the Qobuz app platform, and what you did. "Tests pass" is
-   necessary but not sufficient for anything touching playback, Connect, or
-   DLNA. If you could not test on hardware, say so explicitly.
-
-Link the issue the PR addresses. If there is no issue, the first paragraph of
-the description is the issue.
-
-## Commits
-
-Follow the existing convention: `fix(module):`, `feat(module):`,
-`refactor(module):`, `test(module):`, `docs:`. Subject under 60 characters.
-The body explains the visible behavior or business rule, not the diff.
-
-A PR does not need to be a single commit, but each commit should build and
-pass tests on its own, and the commits should tell the story of the change.
-Fixup and "address review" commits are fine during review; they will be
-squashed on merge if needed.
-
-## Before you open the PR
+You need [uv](https://docs.astral.sh/uv/). It installs Python 3.13 and everything else:
 
 ```bash
-uv run ruff format qobuz_proxy/ tests/
-uv run ruff check qobuz_proxy/ tests/
-uv run mypy qobuz_proxy/
+uv sync
+uv run ruff format qobuz_proxy tests
+uv run ruff check qobuz_proxy tests
+uv run mypy qobuz_proxy
 uv run pytest
 ```
 
-All four must come back clean. Type errors inherited from upstream QobuzProxy
-are switched off per module in `pyproject.toml`; don't add new modules there.
+All four checks are clean on `main`, and the **Checks** workflow runs them on every push, plus a
+build of the add-on image.
 
-New behavior comes with tests. Changed behavior comes with changed tests.
-Tests live under `tests/` mirroring the source tree.
+## Where things are
 
-## Review
+| Path | What |
+|---|---|
+| `qobuz_proxy/backends/music_assistant/` | The bridge: connection, backend, speakers, settings |
+| `qobuz_proxy/webui/music_assistant_routes.py`, `qobuz_proxy/webui/static/panel.*` | The panel and its API |
+| `config.json`, `Dockerfile.*`, `rootfs/start.py`, `translations/`, `DOCS.md`, `CHANGELOG.md` | The Home Assistant add-on |
+| Everything else in `qobuz_proxy/` | Upstream QobuzProxy, unchanged apart from a few small hooks |
 
-Expect a few questions, and possibly a request to split things up. Reviews can take a while since testing
-usually means sitting in front of a speaker. A PR that follows the guidelines above gets through much
-faster because it can be understood and tested in one sitting. Thanks for your patience, and for
-contributing!
+## Tests
+
+Tests describe what a user or the Qobuz app can see. Only the edges are fake:
+
+- `tests/fake_music_assistant.py`: an in-memory Music Assistant server. The real
+  `music-assistant-client` talks to it; playback time moves only with `advance_time`.
+- `tests/fake_qobuz.py`: the Qobuz Connect cloud (it records what the app is shown), the track API
+  and the messages the app sends.
+- `tests/rig.py`: one Music Assistant player wired like production, from the Qobuz websocket down
+  to the Music Assistant client. The `rig` fixture in `tests/conftest.py` hands you one that is
+  already picked in the Qobuz app.
+
+Upstream code is unchanged here and tested upstream, so this repo tests only what it adds;
+`tests/test_upstream_changes.py` covers the hooks in upstream files.
+
+## Merging upstream
+
+```bash
+git remote add upstream https://github.com/leolobato/qobuz-proxy.git
+git fetch upstream
+git merge upstream/main
+```
+
+- Upstream test files: delete them (`git rm`), whether they conflict or are new.
+- `README.md`, `CONTRIBUTING.md`, `index.html`, `routes.py`: keep ours.
+- The hooks (see docs/music-assistant.md): keep both sides, then run
+  `uv run pytest tests/test_upstream_changes.py` and the rest.
+
+## Try the add-on image
+
+```bash
+docker build --file Dockerfile.amd64 --tag qobuz-bridge .
+mkdir -p data && echo '{"log_level": "debug"}' > data/options.json
+docker run --rm --init --network host --volume "$PWD/data:/data" qobuz-bridge
+```
+
+The panel is then on http://localhost:8689.
+
+## Release
+
+Add a `CHANGELOG.md` entry and bump `version` in `config.json`. Home Assistant offers the update
+once the change is on `main`.
