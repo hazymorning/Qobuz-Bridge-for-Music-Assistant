@@ -1,4 +1,5 @@
-"""One Music Assistant player exposed as a Qobuz Connect device, wired like production.
+"""One Music Assistant player (or party speaker) exposed as a Qobuz Connect device, wired like
+production.
 
 Real: the Speaker wiring (``Speaker.start`` and ``Speaker._setup_websocket``), the WsManager
 connection loop (authenticate, subscribe, join), PlaybackCommandHandler, QueueHandler,
@@ -9,7 +10,8 @@ the in-memory FakeMusicAssistantServer.
 Fake: the Qobuz Connect cloud (``QobuzCloud`` decodes every frame the renderer sends, which is
 exactly what the Qobuz app gets to see; the app's frames are injected at
 ``WsManager._handle_payload``), the Qobuz track API (``StubMetadata``: URL and metadata per track
-id; a region-blocked track has neither) and mDNS/HTTP discovery.
+id; a region-blocked track has neither), mDNS/HTTP discovery and Home Assistant
+(``FakeHomeAssistant``).
 
 Time: Music Assistant playback only moves with ``server.advance_time``; the backend's timers are
 patched to milliseconds and every wait is a bounded poll (``Rig.wait_for``).
@@ -31,6 +33,13 @@ from music_assistant_models.enums import PlaybackState as MusicAssistantState
 from qobuz_proxy import speaker as speaker_module
 from qobuz_proxy.backends.music_assistant.backend import MusicAssistantBackend
 from qobuz_proxy.backends.music_assistant.connection import MusicAssistantConnection
+from qobuz_proxy.backends.music_assistant.home_assistant import (
+    NOT_AVAILABLE,
+    HomeAssistantError,
+    MediaPlayer,
+)
+from qobuz_proxy.backends.music_assistant.party import Party, PartyBackend
+from qobuz_proxy.backends.music_assistant.settings import PartySpeaker
 from qobuz_proxy.backends.music_assistant.speakers import speaker_uuid
 from qobuz_proxy.config import SpeakerConfig
 from qobuz_proxy.connect.protocol import DecodedMessage, MessageType
@@ -84,8 +93,54 @@ async def idle(server: FakeMusicAssistantServer, seconds: float) -> None:
         await asyncio.sleep(0.01)
 
 
+class FakeHomeAssistant:
+    """Home Assistant's media players as the add-on reaches them, in-process.
+
+    ``players`` is what ``media_players()`` returns; ``join`` and ``unjoin`` move the entities
+    into and out of the main player's ``group_members`` like a speaker integration does.
+    ``calls`` logs them as ``("join", main, *members)`` and ``("unjoin", entity_id)``; a
+    ``failure`` message makes every call fail with it.
+    """
+
+    def __init__(self, *players: MediaPlayer, available: bool = True) -> None:
+        self.available = available
+        self.players = {p.entity_id: p for p in players}
+        self.calls: list[tuple[str, ...]] = []
+        self.failure = ""
+
+    async def media_players(self) -> list[MediaPlayer]:
+        self._check()
+        return list(self.players.values())
+
+    async def join(self, main_entity_id: str, member_ids: list[str]) -> None:
+        self._check()
+        self.calls.append(("join", main_entity_id, *member_ids))
+        main = self.players[main_entity_id]
+        members = dict.fromkeys([main_entity_id, *main.group_members, *member_ids])
+        self.players[main_entity_id] = main._replace(group_members=list(members))
+
+    async def unjoin(self, entity_id: str) -> None:
+        self._check()
+        self.calls.append(("unjoin", entity_id))
+        for player in list(self.players.values()):
+            if entity_id in player.group_members and entity_id != player.entity_id:
+                members = [m for m in player.group_members if m != entity_id]
+                self.players[player.entity_id] = player._replace(
+                    group_members=members if len(members) > 1 else []
+                )
+
+    def _check(self) -> None:
+        if not self.available:
+            raise HomeAssistantError(NOT_AVAILABLE)
+        if self.failure:
+            raise HomeAssistantError(self.failure)
+
+
 class Rig:
-    """One exposed Music Assistant player as a Qobuz Connect device, wired like production."""
+    """One exposed Music Assistant player as a Qobuz Connect device, wired like production.
+
+    With ``party`` it is that party speaker instead, playing on its main player.
+    """
 
     def __init__(
         self,
@@ -95,10 +150,14 @@ class Rig:
         player_id: str = KITCHEN,
         name: str = "Kitchen (MA)",
         sessions: Optional[dict[str, dict[str, Any]]] = None,
+        party: Optional[PartySpeaker] = None,
+        home_assistant: Optional[FakeHomeAssistant] = None,
     ) -> None:
         self.server = server
-        self.player_id = player_id
+        self.player_id = party.main_player_id if party is not None else player_id
         self.name = name
+        self.party_speaker = party
+        self.home_assistant = home_assistant or FakeHomeAssistant(available=False)
         self.sessions: dict[str, dict[str, Any]] = {} if sessions is None else sessions
         self.cloud = QobuzCloud()
         self.cloud.deliver = self._deliver_later
@@ -118,13 +177,21 @@ class Rig:
         await connection.start()
         if wait_for_music_assistant:
             await self.wait_for(lambda: connection.is_connected, "Music Assistant connected")
-        backend = MusicAssistantBackend(
-            connection,
-            self.player_id,
-            self.name,
-            session=self.sessions.get(self.player_id),
-            save_session=self._save_session,
-        )
+        session = self.sessions.get(self.player_id)
+        backend: MusicAssistantBackend
+        if self.party_speaker is None:
+            backend = MusicAssistantBackend(
+                connection,
+                self.player_id,
+                self.name,
+                session=session,
+                save_session=self._save_session,
+            )
+        else:
+            party = Party(self.party_speaker, connection, self.home_assistant, self.name)
+            backend = PartyBackend(
+                connection, party, self.name, session=session, save_session=self._save_session
+            )
         config = SpeakerConfig(
             name=self.name,
             uuid=speaker_uuid(self.player_id),
@@ -164,6 +231,11 @@ class Rig:
     def player(self) -> Any:
         assert self.speaker is not None and self.speaker._player is not None
         return self.speaker._player
+
+    @property
+    def party(self) -> Party:
+        assert self.speaker is not None and isinstance(self.speaker._backend, PartyBackend)
+        return self.speaker._backend.party
 
     @property
     def ws(self) -> Any:

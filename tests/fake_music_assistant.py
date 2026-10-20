@@ -10,9 +10,12 @@ swapped in, so the product's error handling and event races run against real cli
 The hooks a test drives it with:
 
 - someone in Music Assistant's UI: ``ui_pause``, ``ui_resume``, ``ui_stop``, ``ui_clear``,
-  ``ui_next``, ``ui_previous``, ``ui_seek``; another client: ``user_plays_something_else``
+  ``ui_next``, ``ui_previous``, ``ui_seek``, ``ui_group``; another client:
+  ``user_plays_something_else``
 - the speaker itself: ``device_reports`` (a state or position), ``buffer_next``,
   ``switch_source`` (another source)
+- grouping: ``add_player``/``update_player`` with ``can_group_with`` (the players it can sync
+  with); clients group them with ``players/cmd/set_members``
 - time, which never passes on its own: ``advance_time``, ``finish_current_track``,
   ``mark_ended``, ``auto_stop_after_pause``
 - the server: ``set_reachable``, ``restart`` and ``come_back``, ``revoke_token``
@@ -50,6 +53,7 @@ from music_assistant_models.enums import (
     EventType,
     MediaType,
     PlaybackState,
+    PlayerFeature,
     PlayerType,
     ProviderType,
     QueueOption,
@@ -65,6 +69,7 @@ from music_assistant_models.errors import (
     PlayerUnavailableError,
     ProviderUnavailableError,
     QueueEmpty,
+    UnsupportedFeaturedException,
 )
 from music_assistant_models.event import MassEvent
 from music_assistant_models.media_items import (
@@ -245,6 +250,7 @@ class FakeMusicAssistantServer:
         *,
         enabled: bool = True,
         hide_in_ui: bool = False,
+        can_group_with: Iterable[str] = (),
     ) -> None:
         """Register a player and, unless it is a protocol player, its queue (same id)."""
         members = list(group_members)
@@ -265,6 +271,7 @@ class FakeMusicAssistantServer:
             hide_in_ui=hide_in_ui,
             group_volume=volume,
         )
+        self._set_can_group_with(player_id, can_group_with)
         self._device_item[player_id] = None
         if type != PlayerType.PROTOCOL:
             self.queues[player_id] = PlayerQueue(
@@ -281,15 +288,22 @@ class FakeMusicAssistantServer:
             self._emit(EventType.QUEUE_ADDED, player_id, self.queues[player_id])
 
     def update_player(
-        self, player_id: str, *, name: Optional[str] = None, available: Optional[bool] = None
+        self,
+        player_id: str,
+        *,
+        name: Optional[str] = None,
+        available: Optional[bool] = None,
+        can_group_with: Optional[Iterable[str]] = None,
     ) -> None:
-        """A player provider renames the player or changes its availability."""
+        """A player provider renames the player, or changes its availability or sync partners."""
         with self._operation():
             player = self.players[player_id]
             if name is not None:
                 player.name = name
             if available is not None:
                 player.available = available
+            if can_group_with is not None:
+                self._set_can_group_with(player_id, can_group_with)
             self._touch(player_id)
             queue = self.queues.get(player_id)
             if queue is not None:
@@ -512,6 +526,11 @@ class FakeMusicAssistantServer:
         with self._operation():
             self._seek(queue_id, seconds)
 
+    def ui_group(self, leader_id: str, player_ids: list[str]) -> None:
+        """Someone syncs players with ``leader_id`` in MA's UI."""
+        with self._operation():
+            self._cmd_set_members(leader_id, player_ids_to_add=player_ids)
+
     def drop_connections(self, graceful: bool = True) -> None:
         """Close every websocket: ``start_listening`` returns None, or raises ConnectionFailed."""
         for sock in self._open_sockets():
@@ -597,6 +616,7 @@ class FakeMusicAssistantServer:
             "dashboard/sessions": lambda: [],
             # what the product sends
             "players/cmd/group_volume": self._cmd_group_volume,
+            "players/cmd/set_members": self._cmd_set_members,
             "player_queues/items": self._cmd_queue_items,
             "player_queues/play_media": self._play_media,
             "player_queues/play_index": self._cmd_play_index,
@@ -627,6 +647,41 @@ class FakeMusicAssistantServer:
     def _cmd_group_volume(self, player_id: str, volume_level: int) -> None:
         self._require_available(player_id)
         self._set_volume(player_id, volume_level)
+
+    def _cmd_set_members(
+        self,
+        target_player: str,
+        player_ids_to_add: Optional[list[str]] = None,
+        player_ids_to_remove: Optional[list[str]] = None,
+    ) -> None:
+        """MA's ``set_members`` on a sync leader: players it cannot sync with are left out."""
+        self._require_available(target_player)
+        leader = self.players[target_player]
+        if PlayerFeature.SET_MEMBERS not in leader.supported_features:
+            raise UnsupportedFeaturedException(
+                f"Player {leader.name} does not support group commands"
+            )
+        members = [m for m in leader.group_members if m != target_player]
+        for player_id in player_ids_to_add or []:
+            player = self.players.get(player_id)
+            if player is None or not player.available or player_id not in leader.can_group_with:
+                continue
+            if player_id not in members:
+                members.append(player_id)
+                player.synced_to = target_player
+                self._touch(player_id)
+        for player_id in player_ids_to_remove or []:
+            if player_id in members:
+                members.remove(player_id)
+                self.players[player_id].synced_to = None
+                self._touch(player_id)
+        leader.group_members = UniqueList([target_player, *members] if members else [])
+        self._touch(target_player)
+
+    def _set_can_group_with(self, player_id: str, can_group_with: Iterable[str]) -> None:
+        player = self.players[player_id]
+        player.can_group_with = set(can_group_with)
+        player.supported_features = {PlayerFeature.SET_MEMBERS} if player.can_group_with else set()
 
     def _cmd_queue_items(self, queue_id: str, limit: int = 500, offset: int = 0) -> list[QueueItem]:
         return self.queue_items.get(queue_id, [])[offset : offset + limit]

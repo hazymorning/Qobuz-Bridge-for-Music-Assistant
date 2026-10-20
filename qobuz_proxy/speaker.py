@@ -8,7 +8,7 @@ run concurrently, one per physical audio device.
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from aiohttp import web
 
@@ -38,6 +38,7 @@ from qobuz_proxy.playback import (
 )
 from qobuz_proxy.backends import AudioBackend, BackendFactory, PlaybackState
 from qobuz_proxy.backends.base import ExternalPlaybackAware
+from qobuz_proxy.playback.command_handler import MSG_TYPE_SET_ACTIVE
 from qobuz_proxy.playback.play_reporter import PlayReporter
 from qobuz_proxy.playback.volume_handler import MSG_TYPE_SRVR_CTRL_VOLUME_CHANGED
 from qobuz_proxy.playback.state_reporter import PlaybackStateReport, wire_playing_state
@@ -437,6 +438,30 @@ class Speaker:
         if self._volume_handler:
             asyncio.create_task(self._volume_handler.handle_message(msg_type, msg))
 
+    def _dispatch_playback(self, msg_type: int, msg: Any) -> "asyncio.Task[None]":
+        """Hand a playback message to the playback handler.
+
+        After the stop for SET_ACTIVE(false), a backend with app_left() (a party
+        speaker) hears that the Qobuz app left this speaker.
+        """
+        assert self._playback_handler is not None
+        task = self._playback_handler.dispatch_message(msg_type, msg)
+        if (
+            msg_type == MSG_TYPE_SET_ACTIVE
+            and msg.HasField("srvrRndrSetActive")
+            and not msg.srvrRndrSetActive.active
+        ):
+            task.add_done_callback(self._on_app_left)
+        return task
+
+    def _on_app_left(self, task: "asyncio.Task[None]") -> None:
+        app_left = getattr(self._backend, "app_left", None)
+        if task.cancelled() or app_left is None:
+            return
+        if self._ws_manager and self._ws_manager.is_renderer_active:
+            return  # picked again in the meantime
+        app_left()
+
     def _on_device_volume_change(self, level: int) -> None:
         """Report a volume change made on the device (e.g. in Music Assistant) to the app."""
         if not self._player or not (self._ws_manager and self._ws_manager.is_renderer_active):
@@ -525,7 +550,7 @@ class Speaker:
                 for msg_type in self._playback_handler.get_message_types():
                     self._ws_manager.register_handler(
                         msg_type,
-                        self._playback_handler.dispatch_message,
+                        self._dispatch_playback,
                     )
 
                 for msg_type in self._volume_handler.get_message_types():

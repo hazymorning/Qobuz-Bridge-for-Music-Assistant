@@ -15,6 +15,7 @@
   "panel_title": "MA Qobuz Bridge",
   "panel_admin": true,
   "hassio_api": true,
+  "homeassistant_api": true,
   "hassio_role": "default",
   "watchdog": "http://[HOST]:[PORT:8689]/api/status",
   "options": {

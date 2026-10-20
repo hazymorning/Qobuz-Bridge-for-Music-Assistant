@@ -8,18 +8,21 @@ import pytest
 
 from qobuz_proxy.backends.music_assistant import backend as backend_module
 from qobuz_proxy.backends.music_assistant import connection as connection_module
+from qobuz_proxy.backends.music_assistant import party as party_module
+from qobuz_proxy.backends.music_assistant.settings import PartySpeaker
 from qobuz_proxy.connect import ws_manager
 from qobuz_proxy.playback import state_reporter as state_reporter_module
 from tests.fake_music_assistant import FakeMusicAssistantServer
-from tests.rig import KITCHEN, Rig
+from tests.rig import KITCHEN, FakeHomeAssistant, Rig
 
 StartSpeaker = Callable[..., Awaitable[Rig]]
 
 
 @pytest.fixture(autouse=True)
 def _isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep all the add-on's data (Qobuz login, Music Assistant settings) in the test's tmp_path."""
+    """Keep all the add-on's data in the test's tmp_path, and Home Assistant out of reach."""
     monkeypatch.setattr("qobuz_proxy.app.CACHE_DIR", tmp_path)
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
     monkeypatch.setattr("qobuz_proxy.auth.credentials.CACHE_DIR", tmp_path)
     monkeypatch.setattr("qobuz_proxy.auth.credentials.CACHE_FILE", tmp_path / "credentials.json")
 
@@ -45,6 +48,7 @@ def fast_timers(monkeypatch: pytest.MonkeyPatch) -> None:
     }.items():
         monkeypatch.setattr(backend_module, name, value)
     monkeypatch.setattr(connection_module, "RECONNECT_DELAYS_SECONDS", (0.02,))
+    monkeypatch.setattr(party_module, "PARTY_RELEASE_DELAY_SECONDS", 0.3)
     # A second Qobuz app picking the speaker makes it reconnect to the Qobuz cloud
     monkeypatch.setattr(ws_manager, "INITIAL_RECONNECT_DELAY", 0.02)
 
@@ -75,7 +79,7 @@ def fake_login(server: FakeMusicAssistantServer, monkeypatch: pytest.MonkeyPatch
 async def start_speaker(
     server: FakeMusicAssistantServer, monkeypatch: pytest.MonkeyPatch
 ) -> AsyncIterator[StartSpeaker]:
-    """Start a player's speaker (Kitchen by default) and pick it in the Qobuz app."""
+    """Start a player's speaker (Kitchen by default) or a party speaker; pick it in the app."""
     started: list[Rig] = []
 
     async def start(
@@ -84,8 +88,18 @@ async def start_speaker(
         player_id: str = KITCHEN,
         name: str = "Kitchen (MA)",
         wait_for_music_assistant: bool = True,
+        party: Optional[PartySpeaker] = None,
+        home_assistant: Optional[FakeHomeAssistant] = None,
     ) -> Rig:
-        rig = Rig(server, monkeypatch, player_id=player_id, name=name, sessions=sessions)
+        rig = Rig(
+            server,
+            monkeypatch,
+            player_id=player_id,
+            name=name,
+            sessions=sessions,
+            party=party,
+            home_assistant=home_assistant,
+        )
         started.append(rig)
         await rig.start(wait_for_music_assistant=wait_for_music_assistant)
         await rig.select()
