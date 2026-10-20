@@ -84,8 +84,8 @@ git merge upstream/main
 - `pyproject.toml`, `.gitignore`, `.dockerignore`: keep both sides.
 - `uv.lock`: take ours, then run `uv lock` and `uv sync`.
 - Anything upstream has that this repo deleted: its tests (every file in `tests/` except
-  `__init__.py` and the ones listed above), `scripts/`, `.github/workflows/release.yml`, its notes
-  and its editor settings. `git rm` them again, whether they conflict or are new.
+  `__init__.py` and the ones listed above), `scripts/`, its notes and its editor settings. `git rm`
+  them again, whether they conflict or are new.
 
 ## Try the add-on image
 
@@ -100,5 +100,6 @@ makes it readable only by itself, so remove it with `sudo rm -rf "$data"`.
 
 ## Release
 
-Add a `CHANGELOG.md` entry and bump `version` in `config.json`. Home Assistant offers the update
-once the change is on `main`.
+Add a `## <version>` entry to `CHANGELOG.md` and bump `version` in `config.json`. Once that is on
+`main`, Home Assistant offers the update and the **Release** workflow publishes `v<version>` on
+GitHub with the changelog entry as its notes.
