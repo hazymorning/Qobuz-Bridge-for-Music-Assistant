@@ -1,4 +1,4 @@
-# Qobuz Bridge for Music Assistant
+# MA Qobuz Bridge
 
 A Home Assistant add-on that puts your Music Assistant players and groups in the device list of
 the Qobuz app. Pick one and press play: Music Assistant plays the music and shows the track,
@@ -12,10 +12,10 @@ a Qobuz subscription.
 
 1. In Home Assistant open **Settings → Add-ons** (called **Apps** in newer versions) **→ Add-on
    Store → ⋮ → Repositories**, paste
-   `https://github.com/hazymorning/Qobuz-Bridge-for-Music-Assistant` and tap **Add**.
-2. Open **Qobuz Bridge for Music Assistant**, tap **Install**, then **Start**. The add-on is built
+   `https://github.com/hazymorning/ma-qobuz-bridge` and tap **Add**.
+2. Open **MA Qobuz Bridge**, tap **Install**, then **Start**. The add-on is built
    on your Home Assistant box, which takes a few minutes on a Raspberry Pi.
-3. Open **Qobuz Bridge** in the sidebar. If it is not there, tap **Open Web UI** on the add-on page.
+3. Open **MA Qobuz Bridge** in the sidebar. If it is not there, tap **Open Web UI** on the add-on page.
 4. Tap **Log in to Qobuz**, sign in on the page that opens, then come back to the panel. Do this
    while your phone is on your home Wi-Fi.
 5. Under **Music Assistant**, enter your Music Assistant username and password and tap

@@ -2,6 +2,7 @@
 
 ## 0.2.0
 
+- New, shorter name: MA Qobuz Bridge.
 - The Music Assistant login takes a username and password only. The pasted-token option is gone;
   if you have no Music Assistant password, set one in your Music Assistant user profile.
 - Speakers always end in " (MA)"; the switch to leave it off is gone.

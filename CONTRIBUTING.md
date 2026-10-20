@@ -1,4 +1,4 @@
-# Working on Qobuz Bridge
+# Working on MA Qobuz Bridge
 
 The add-on is upstream [QobuzProxy](https://github.com/leolobato/qobuz-proxy) plus a Music
 Assistant backend, a panel and the Home Assistant packaging. How the bridge works is in
@@ -59,9 +59,9 @@ git merge upstream/main
 ## Try the add-on image
 
 ```bash
-docker build --file Dockerfile.amd64 --tag qobuz-bridge .
+docker build --file Dockerfile.amd64 --tag ma-qobuz-bridge .
 mkdir -p data && echo '{"log_level": "debug"}' > data/options.json
-docker run --rm --init --network host --volume "$PWD/data:/data" qobuz-bridge
+docker run --rm --init --network host --volume "$PWD/data:/data" ma-qobuz-bridge
 ```
 
 The panel is then on http://localhost:8689.

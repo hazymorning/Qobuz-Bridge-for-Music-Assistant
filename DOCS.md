@@ -1,4 +1,4 @@
-# Qobuz Bridge for Music Assistant
+# MA Qobuz Bridge
 
 Each of your Music Assistant players and groups shows up as a speaker in the Qobuz app. When you
 pick one and press play, the add-on asks Music Assistant to play that Qobuz track on that player.
@@ -20,18 +20,18 @@ previous or clearing the queue in Music Assistant show the speaker as stopped.
 
 1. **Add the repository.** **Settings → Add-ons** (called **Apps** in newer versions)
    **→ Add-on Store → ⋮ → Repositories**, paste
-   `https://github.com/hazymorning/Qobuz-Bridge-for-Music-Assistant` and tap **Add**.
+   `https://github.com/hazymorning/ma-qobuz-bridge` and tap **Add**.
 2. **Install and start.** The add-on is built on your box, which takes a few minutes on a
    Raspberry Pi. If the build fails, the reason is in **Settings → System → Logs → Supervisor**.
 3. **Open the panel.** On its first start the add-on turns on **Show in sidebar** and
-   **Watchdog** once. Open **Qobuz Bridge** in the sidebar, or **Open Web UI** on the add-on page.
+   **Watchdog** once. Open **MA Qobuz Bridge** in the sidebar, or **Open Web UI** on the add-on page.
 4. **Log in to Qobuz.** Qobuz's login page cannot open inside Home Assistant, so the button opens
    the add-on's own address (`http://<home-assistant-ip>:8689`) in a new tab. Sign in there, then
    come back. Do it from your home network: it does not work through Nabu Casa or other remote
    access. If no tab opens, the panel shows the address as a link.
 5. **Connect to Music Assistant.** The address is filled in (`http://127.0.0.1:8095` when Music
    Assistant runs as an add-on on the same box). Enter your Music Assistant username and password
-   and tap **Connect**. The add-on uses them once to get a long-lived token named "Qobuz Bridge"
+   and tap **Connect**. The add-on uses them once to get a long-lived token named "MA Qobuz Bridge"
    and keeps only the token.
 6. **Choose the players.** **All my Music Assistant players** is on by default. Switch it off to
    tick only the players and groups you want.
@@ -108,7 +108,7 @@ never in the log. They are part of Home Assistant backups of the add-on.
   the **Log** tab names the track.
 - **Logs:** the add-on's **Log** tab. Set `log_level` to `debug` for more detail and include the
   log when you report a problem at
-  https://github.com/hazymorning/Qobuz-Bridge-for-Music-Assistant/issues.
+  https://github.com/hazymorning/ma-qobuz-bridge/issues.
 
 ## Testing a branch
 

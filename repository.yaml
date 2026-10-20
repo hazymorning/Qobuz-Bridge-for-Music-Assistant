@@ -1,5 +1,5 @@
 # Home Assistant add-on repository. The add-on itself is the repository root
 # (config.json next to this file), so the whole repo is the build context.
-name: Qobuz Bridge for Music Assistant
-url: https://github.com/hazymorning/Qobuz-Bridge-for-Music-Assistant
+name: MA Qobuz Bridge
+url: https://github.com/hazymorning/ma-qobuz-bridge
 maintainer: hazymorning
