@@ -34,7 +34,7 @@ from qobuz_proxy.backends.music_assistant.connection import (  # noqa: E402
     PlayerInfo,
     login_and_create_token,
 )
-from tests.backends.fake_music_assistant import DROP, DROP_HARD, HANG, FakeMusicAssistantServer  # noqa: E402
+from tests.fake_music_assistant import DROP, DROP_HARD, HANG, FakeMusicAssistantServer  # noqa: E402
 
 QID = "up1"
 REAL_RECONNECT_DELAYS = connection_module.RECONNECT_DELAYS_SECONDS  # before fast_timing

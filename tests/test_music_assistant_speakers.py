@@ -31,7 +31,7 @@ from qobuz_proxy.backends.music_assistant.speakers import (  # noqa: E402
 )
 from qobuz_proxy.backends.music_assistant.settings import KnownPlayer, Settings  # noqa: E402
 from qobuz_proxy.config import _SPEAKER_UUID_NAMESPACE, SpeakerConfig  # noqa: E402
-from tests.backends.fake_music_assistant import FakeMusicAssistantServer  # noqa: E402
+from tests.fake_music_assistant import FakeMusicAssistantServer  # noqa: E402
 
 SHAREABLE = {"up1", "grp", "pair"}  # player, group, stereo pair (not hidden/disabled/protocol)
 BIND = "192.0.2.10"

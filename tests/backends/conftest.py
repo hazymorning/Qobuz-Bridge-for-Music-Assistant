@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from qobuz_proxy.backends.music_assistant.backend import MusicAssistantBackend
     from qobuz_proxy.backends.music_assistant.connection import MusicAssistantConnection
-    from tests.backends.fake_music_assistant import FakeMusicAssistantServer
+    from tests.fake_music_assistant import FakeMusicAssistantServer
 
 QID = "up1"
 NAME = "Kitchen (MA)"
@@ -235,7 +235,7 @@ def timing(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
 @pytest.fixture
 async def rig(timing: Callable[..., None]) -> AsyncIterator[Rig]:
     """A rig whose connection is up and whose backend is connected."""
-    from tests.backends.fake_music_assistant import FakeMusicAssistantServer
+    from tests.fake_music_assistant import FakeMusicAssistantServer
 
     server = FakeMusicAssistantServer()
     server.add_qobuz_provider()

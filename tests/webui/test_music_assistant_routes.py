@@ -30,7 +30,7 @@ from qobuz_proxy.backends.music_assistant.settings import DEFAULT_URL, Settings 
 from qobuz_proxy.webui import music_assistant_routes  # noqa: E402
 from qobuz_proxy.webui.music_assistant_routes import build_checks  # noqa: E402
 from qobuz_proxy.webui.routes import register_routes  # noqa: E402
-from tests.backends.fake_music_assistant import FakeMusicAssistantServer  # noqa: E402
+from tests.fake_music_assistant import FakeMusicAssistantServer  # noqa: E402
 
 STATIC = Path(__file__).resolve().parents[2] / "qobuz_proxy" / "webui" / "static"
 LOGGED_IN = {"authenticated": True, "user_id": "1", "email": "user@example.com", "name": "Alice"}
