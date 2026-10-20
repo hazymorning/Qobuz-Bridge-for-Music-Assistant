@@ -141,6 +141,11 @@ class Rig:
         assert self.speaker is not None and self.speaker._ws_manager is not None
         return self.speaker._ws_manager
 
+    @property
+    def backend(self) -> MusicAssistantBackend:
+        assert self.speaker is not None and self.speaker._backend is not None
+        return self.speaker._backend  # type: ignore[return-value]
+
     def _track_handlers(self) -> None:
         """Keep the tasks the handlers spawn, so deliver() can wait for them."""
         handlers = self.ws._handlers
