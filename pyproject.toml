@@ -55,6 +55,7 @@ music-assistant = [
 # by default on `uv sync` — see [tool.uv].default-groups below.
 [dependency-groups]
 dev = [
+    "qobuz-proxy[music-assistant]",  # the tests drive the Music Assistant backend
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
     "mypy>=1.7.0",
@@ -100,9 +101,10 @@ module = ["music_assistant_client", "music_assistant_client.*", "music_assistant
 follow_imports = "skip"
 follow_untyped_imports = true
 
-# The generated protobuf code (excluded above) and the optional sound library carry no types
+# The generated protobuf code (excluded above) and the optional local-audio libraries, which
+# `uv sync` leaves out
 [[tool.mypy.overrides]]
-module = ["qobuz_proxy.proto.*", "sounddevice"]
+module = ["qobuz_proxy.proto.*", "sounddevice", "numpy"]
 follow_imports = "skip"
 ignore_missing_imports = true
 
@@ -123,3 +125,8 @@ disable_error_code = ["arg-type", "misc"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+filterwarnings = [
+    # Upstream code: its web app uses plain string keys, its Qobuz websocket reads close codes
+    "ignore::aiohttp.web_exceptions.NotAppKeyWarning",
+    "ignore:ConnectionClosed.(code|reason) is deprecated:DeprecationWarning",
+]

@@ -823,6 +823,11 @@ class FakeMusicAssistantServer:
         with self._operation():
             self._handle_stop(queue_id)
 
+    def ui_clear(self, queue_id: str) -> None:
+        """Someone clears the queue in MA's UI (``player_queues/clear``)."""
+        with self._operation():
+            self._clear(queue_id)
+
     def ui_next(self, queue_id: str) -> None:
         """Someone presses next in MA's UI (no-op at the end of the queue)."""
         with self._operation():

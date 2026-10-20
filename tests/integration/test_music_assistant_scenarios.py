@@ -626,7 +626,7 @@ class TestMusicAssistantUnreachableAtBoot:
         self, server, monkeypatch, caplog
     ):
         server.reachable = False
-        rig = await Rig(server, monkeypatch).start(wait_for_ma=False)
+        rig = await Rig(server, monkeypatch).start(wait_for_music_assistant=False)
         try:
             assert rig.conn.status.state in (
                 ConnectionState.CONNECTING,

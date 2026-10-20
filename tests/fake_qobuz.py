@@ -35,6 +35,7 @@ class StubMetadata:
 
     def __init__(self) -> None:
         self.unavailable: set[str] = set()
+        self.max_qualities: list[int] = []  # every quality the app chose
 
     async def get_streaming_url(self, track_id: str) -> Optional[str]:
         if track_id in self.unavailable:
@@ -61,6 +62,9 @@ class StubMetadata:
 
     def get_track_blob(self, track_id: str) -> Optional[str]:
         return None
+
+    def set_max_quality(self, quality: int) -> None:
+        self.max_qualities.append(quality)
 
     def log_now_playing_info(self, metadata: Any, actual_quality: Optional[int] = None) -> None:
         pass

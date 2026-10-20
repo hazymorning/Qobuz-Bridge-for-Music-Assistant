@@ -17,6 +17,7 @@ patched to milliseconds and every wait is a bounded poll (``Rig.wait_for``).
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from typing import Any, Callable, Optional
 from unittest.mock import MagicMock
@@ -50,8 +51,40 @@ PID = "up1"
 BACKEND_LOGGER = "qobuz_proxy.backends.music_assistant"
 
 
+async def wait_for(
+    condition: Callable[[], Any],
+    what: str,
+    *,
+    server: Optional[FakeMusicAssistantServer] = None,
+    timeout: float = 3.0,
+) -> None:
+    """Poll ``condition`` (plain or async) until it holds, letting Music Assistant's events in."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        if server is not None:
+            await server.settle()
+        result = condition()
+        if inspect.isawaitable(result):
+            result = await result
+        if result:
+            return
+        if loop.time() > deadline:
+            pytest.fail(f"timed out waiting for {what}")
+        await asyncio.sleep(0.005)
+
+
+async def idle(server: FakeMusicAssistantServer, seconds: float) -> None:
+    """Let real time pass with Music Assistant's events flowing."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    while loop.time() < deadline:
+        await server.settle()
+        await asyncio.sleep(0.01)
+
+
 class Rig:
-    """One exposed MA player as a Qobuz Connect device, wired like production."""
+    """One exposed Music Assistant player as a Qobuz Connect device, wired like production."""
 
     def __init__(
         self,
@@ -82,12 +115,12 @@ class Rig:
         self.discovery = StubDiscovery(*args, **kwargs)
         return self.discovery
 
-    async def start(self, *, wait_for_ma: bool = True) -> Rig:
+    async def start(self, *, wait_for_music_assistant: bool = True) -> Rig:
         self.conn = MusicAssistantConnection(
             self.server.url, self.server.token, client_factory=self.server.client_factory
         )
         await self.conn.start()
-        if wait_for_ma:
+        if wait_for_music_assistant:
             await self.wait_for(lambda: self.conn is not None and self.conn.is_connected, "MA")
         backend = MusicAssistantBackend(
             self.conn,
@@ -108,7 +141,7 @@ class Rig:
         return self
 
     def _save_session(self, session: Optional[dict[str, Any]]) -> None:
-        """Keep the backend's session like the music_assistant does (per MA player id)."""
+        """Keep the backend's session like MusicAssistantSpeakers does (per player id)."""
         if session is None:
             self.sessions.pop(self.player_id, None)
         else:
@@ -241,6 +274,14 @@ class Rig:
     def app_position(self) -> int:
         return int(self.cloud.reports[-1].currentPosition.value)
 
+    def shown_states(self, since: int = 0) -> set[int]:
+        """Every playing state the app was shown, from report number ``since`` on."""
+        return {report.playingState for report in self.cloud.reports[since:]}
+
+    def has_left_qobuz_session(self) -> bool:
+        """The speaker closed its Qobuz connection, so the app no longer shows it playing."""
+        return self.cloud.sockets[-1].closed.is_set()
+
     def queue_track(self) -> Optional[str]:
         queue = self.server.queue(self.player_id)
         if queue.current_index is None:
@@ -262,23 +303,11 @@ class Rig:
         return [name for name, _ in self.server.writes]
 
     async def wait_for(self, cond: Callable[[], Any], what: str, timeout: float = 3.0) -> None:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        while True:
-            await self.server.settle()
-            if cond():
-                return
-            if loop.time() > deadline:
-                pytest.fail(f"timed out waiting for {what}")
-            await asyncio.sleep(0.005)
+        await wait_for(cond, what, server=self.server, timeout=timeout)
 
     async def idle(self, seconds: float = 0.3) -> None:
         """Let real time pass (timers, the player's 0.5 s monitor) with MA events flowing."""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + seconds
-        while loop.time() < deadline:
-            await self.server.settle()
-            await asyncio.sleep(0.01)
+        await idle(self.server, seconds)
         await self.drain()
 
 

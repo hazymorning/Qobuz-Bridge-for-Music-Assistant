@@ -7,6 +7,7 @@ import pytest
 
 from qobuz_proxy.backends.music_assistant import backend as backend_module
 from qobuz_proxy.backends.music_assistant import connection as connection_module
+from qobuz_proxy.connect import ws_manager
 from qobuz_proxy.playback import state_reporter as state_reporter_module
 from tests.fake_music_assistant import FakeMusicAssistantServer
 from tests.rig import Rig, make_server
@@ -39,6 +40,8 @@ def fast_timers(monkeypatch: pytest.MonkeyPatch) -> None:
     }.items():
         monkeypatch.setattr(backend_module, name, value)
     monkeypatch.setattr(connection_module, "RECONNECT_DELAYS_SECONDS", (0.02,))
+    # A second Qobuz app picking the speaker makes it reconnect to the Qobuz cloud
+    monkeypatch.setattr(ws_manager, "INITIAL_RECONNECT_DELAY", 0.02)
 
 
 @pytest.fixture
@@ -50,6 +53,13 @@ def fast_heartbeat(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def server() -> FakeMusicAssistantServer:
     return make_server()
+
+
+@pytest.fixture
+def fake_login(server: FakeMusicAssistantServer, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Music Assistant logins (username and password) go to the fake server."""
+    monkeypatch.setattr(connection_module, "login", server.login)
+    monkeypatch.setattr(connection_module, "MusicAssistantClient", server.client_class)
 
 
 @pytest.fixture

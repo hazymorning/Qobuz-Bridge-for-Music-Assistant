@@ -1487,6 +1487,7 @@ dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "qobuz-proxy", extra = ["music-assistant"] },
     { name = "ruff" },
     { name = "types-pyyaml" },
 ]
@@ -1512,6 +1513,7 @@ dev = [
     { name = "mypy", specifier = ">=1.7.0" },
     { name = "pytest", specifier = ">=7.4.0" },
     { name = "pytest-asyncio", specifier = ">=0.21.0" },
+    { name = "qobuz-proxy", extras = ["music-assistant"] },
     { name = "ruff", specifier = ">=0.1.0" },
     { name = "types-pyyaml", specifier = ">=6.0" },
 ]
