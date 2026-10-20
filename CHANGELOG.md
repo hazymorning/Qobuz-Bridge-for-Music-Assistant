@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0
+
+- Give any speaker your own name: **Rename** under a player in the panel. Clear the name to get
+  the Music Assistant name plus " (MA)" back.
+
 ## 0.2.1
 
 - The Music Assistant login takes a long-lived token again (**Use a token instead**), for anyone

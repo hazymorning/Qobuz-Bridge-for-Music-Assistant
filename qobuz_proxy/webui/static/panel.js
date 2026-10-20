@@ -15,6 +15,7 @@
     var pollTimer = null;
     var failures = 0;
     var busy = false; // a change is being sent; polls must not undo it on screen
+    var renaming = null; // the player whose speaker name is being edited
 
     function $(id) {
         return document.getElementById(id);
@@ -141,10 +142,20 @@
         if (!$("music-assistant-username").value) $("music-assistant-username").value = connection.username;
     }
 
+    function playersKey(status) {
+        return [status.expose_all, status.is_configured, status.connection.state, status.players];
+    }
+
     function renderPlayers(status) {
-        var connected = status.connection.state === "connected";
         $("expose-all").checked = status.expose_all;
-        if (!changed("players", [status.expose_all, status.is_configured, connected, status.players])) return;
+        if (renaming !== null) return; // the list waits while a name is typed
+        if (!changed("players", playersKey(status))) return;
+        drawPlayers(status);
+    }
+
+    function drawPlayers(status) {
+        drawn.players = JSON.stringify(playersKey(status));
+        var connected = status.connection.state === "connected";
         var list = $("players");
         list.textContent = "";
         status.players.forEach(function (p) {
@@ -166,6 +177,7 @@
             label.appendChild(text);
             var item = el("li");
             item.appendChild(label);
+            item.appendChild(renaming === p.player_id ? renameForm(p) : renameButton(p));
             list.appendChild(item);
         });
         var empty = "";
@@ -174,6 +186,54 @@
         else if (!status.players.length) empty = "Your players show up here once Music Assistant is connected.";
         $("players-empty").textContent = empty;
         show($("players-empty"), !!empty);
+    }
+
+    function renameButton(p) {
+        var button = el("button", "link-button rename", "Rename");
+        button.type = "button";
+        button.addEventListener("click", function () {
+            renaming = p.player_id;
+            show($("players-error"), false);
+            drawPlayers(last);
+            $("players").querySelector(".rename-form input").focus();
+        });
+        return button;
+    }
+
+    function renameForm(p) {
+        var form = el("form", "rename-form");
+        var label = el("label", "", "Name in the Qobuz app");
+        var input = el("input");
+        input.type = "text";
+        input.maxLength = 40;
+        input.autocomplete = "off";
+        input.value = p.custom_name;
+        input.placeholder = p.default_name;
+        label.appendChild(input);
+        var save = el("button", "", "Save");
+        save.type = "submit";
+        var cancel = el("button", "button-secondary", "Cancel");
+        cancel.type = "button";
+        var buttons = el("div", "rename-buttons");
+        buttons.appendChild(save);
+        buttons.appendChild(cancel);
+        form.appendChild(label);
+        form.appendChild(buttons);
+        form.appendChild(el("p", "note", "Leave it empty for “" + p.default_name + "”."));
+        function done() {
+            renaming = null;
+            drawPlayers(last);
+        }
+        form.addEventListener("submit", function (event) {
+            event.preventDefault();
+            save.disabled = true;
+            var body = { player_id: p.player_id, name: input.value.trim() };
+            send("PUT", "api/music-assistant/speaker-name", body, $("players-error")).then(done, function () {
+                save.disabled = false;
+            });
+        });
+        cancel.addEventListener("click", done);
+        return form;
     }
 
     function render(status) {

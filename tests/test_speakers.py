@@ -186,6 +186,31 @@ async def test_every_visible_player_group_and_stereo_pair_appears_in_the_app_und
     await add_on.wait_for(lambda: not _panel_row(music_assistant, "pair")["available"], "offline")
 
 
+async def test_a_speaker_keeps_the_name_the_user_gave_it_until_it_is_cleared(add_on):
+    music_assistant = await add_on.start()
+    await add_on.wait_until_listed(EXPOSED)
+
+    await music_assistant.set_speaker_name(KITCHEN, "  Küche   oben ")
+    assert add_on.listed()[KITCHEN] == "Küche oben"  # as typed, without " (MA)"
+    assert add_on.speaker(KITCHEN).config.uuid == KITCHEN_UUID  # the same device in the app
+    for name, problem in [
+        ("Downstairs (MA)", "already called"),
+        ("küche OBEN", "already called"),
+        ("x" * 41, "40 characters"),
+        ("Bad\x00name", "letters, numbers"),
+    ]:
+        with pytest.raises(ValueError, match=problem):
+            await music_assistant.set_speaker_name("pair", name)
+
+    await add_on.stop()  # and the add-on restarts
+    music_assistant = await add_on.start()
+    await add_on.wait_until_listed(EXPOSED)
+    assert add_on.listed()[KITCHEN] == "Küche oben"
+
+    await music_assistant.set_speaker_name(KITCHEN, "")
+    assert add_on.listed()[KITCHEN] == "Kitchen (MA)"
+
+
 async def test_ticked_players_are_the_only_ones_in_the_app_and_stay_ticked(add_on):
     music_assistant = await add_on.start()
     await add_on.wait_until_listed(EXPOSED)

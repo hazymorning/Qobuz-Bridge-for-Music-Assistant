@@ -2,8 +2,9 @@
 Music Assistant settings, kept as one private JSON file in the data directory.
 
 Holds the MA address and long-lived token, which MA players are exposed, the
-discovery port of every player exposed so far, and for each player the MA
-queue items the bridge created (so an add-on restart can continue them).
+discovery port of every player exposed so far, the names the user gave their
+speakers, and for each player the MA queue items the bridge created (so an
+add-on restart can continue them).
 """
 
 import json
@@ -37,6 +38,7 @@ class Settings:
     expose_all: bool = True
     selected_player_ids: list[str] = field(default_factory=list)
     known_players: dict[str, KnownPlayer] = field(default_factory=dict)
+    speaker_names: dict[str, str] = field(default_factory=dict)  # player id -> the user's name
     sessions: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
