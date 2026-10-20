@@ -1102,6 +1102,45 @@ class TestSwitchQobuzDevice:
         )
 
 
+class TestTwoQobuzApps:
+    async def test_phone_and_laptop_both_control_the_player_without_restarting_it(self, rig):
+        await rig.play_album(0)  # the phone starts the album
+        await rig.wait_armed("102")
+        rig.server.advance_time(PID, 40)
+        rig.server.clear_logs()
+
+        # The laptop picks the same speaker: a new discovery connect into the same session,
+        # and the cloud replays where the music is
+        laptop = ConnectTokens(
+            session_id=rig.tokens.session_id,
+            ws_token=JWTConnectToken(jwt="laptop-jwt", exp=9_999_999_999, endpoint="wss://q/ws"),
+        )
+        await rig.select(laptop)
+        await rig.deliver(album_state(0, APP_PLAYING, pos=40_000))
+        await rig.idle(0.3)
+        assert rig.writes() == []  # no restart, no seek: MA just plays on
+        assert rig.queue_track() == "101" and rig.app() == (APP_PLAYING, 1)
+
+        # The laptop pauses, the phone resumes, then either skips to the next track
+        await rig.deliver(album_state(0, APP_PAUSED, pos=40_000))
+        await rig.wait_for(lambda: rig.queue_state() == MusicAssistantState.PAUSED, "paused")
+        await rig.deliver(album_state(0, APP_PLAYING, pos=40_000))
+        await rig.wait_for(lambda: rig.queue_state() == MusicAssistantState.PLAYING, "resumed")
+        await rig.deliver(album_state(1, APP_PLAYING, pos=0))
+        await rig.wait_for(
+            lambda: rig.queue_track() == "102" and rig.app() == (APP_PLAYING, 2), "next track"
+        )
+        assert rig.writes()[:3] == [
+            "player_queues/pause",
+            "player_queues/play",
+            "player_queues/play_index",  # the next track MA already had queued
+        ]
+        # Only the following track gets queued; nothing replaces what plays
+        assert {c["option"] for c in rig.server.calls("player_queues/play_media")} <= {
+            "replace_next"
+        }
+
+
 class TestMAUnreachableAtBoot:
     async def test_play_fails_cleanly_while_ma_is_down_and_works_once_it_is_back(
         self, server, monkeypatch, caplog
