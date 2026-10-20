@@ -1,7 +1,8 @@
 /*
- * The add-on panel: status checks, Qobuz login, Music Assistant login and the
- * players shown in the Qobuz app. Every URL is relative, so the page also works
- * under Home Assistant ingress (<base href> = /api/hassio_ingress/<token>/).
+ * The add-on panel: status checks, Qobuz login, Music Assistant login, the
+ * players shown in the Qobuz app and the party speakers. Every URL is relative,
+ * so the page also works under Home Assistant ingress
+ * (<base href> = /api/hassio_ingress/<token>/).
  */
 (function () {
     "use strict";
@@ -9,6 +10,7 @@
     var POLL_MS = 3000;
     var ICONS = { ok: "✓", warn: "!", error: "✕", pending: "…" };
     var TYPES = { group: "Group", stereo_pair: "Stereo pair" };
+    var GROUPINGS = { music_assistant: "Music Assistant", home_assistant: "Home Assistant" };
 
     var last = null; // the last status from the server
     var drawn = {}; // what each section shows now, to leave unchanged ones alone
@@ -16,6 +18,7 @@
     var failures = 0;
     var busy = false; // a change is being sent; polls must not undo it on screen
     var renaming = null; // the player whose speaker name is being edited
+    var party = null; // the party speaker form while it is open (see openPartyForm)
 
     function $(id) {
         return document.getElementById(id);
@@ -214,7 +217,7 @@
         save.type = "submit";
         var cancel = el("button", "button-secondary", "Cancel");
         cancel.type = "button";
-        var buttons = el("div", "rename-buttons");
+        var buttons = el("div", "form-buttons");
         buttons.appendChild(save);
         buttons.appendChild(cancel);
         form.appendChild(label);
@@ -236,12 +239,295 @@
         return form;
     }
 
+    function partiesKey(status) {
+        return [status.party_speakers, status.players];
+    }
+
+    function renderParties(status) {
+        if (party !== null) return; // the section waits while the form is open
+        if (!changed("parties", partiesKey(status))) return;
+        drawParties(status);
+    }
+
+    function drawParties(status) {
+        drawn.parties = JSON.stringify(partiesKey(status));
+        var names = {};
+        status.players.forEach(function (p) {
+            names[p.player_id] = p.name;
+        });
+        var list = $("party-speakers");
+        list.textContent = "";
+        status.party_speakers.forEach(function (p) {
+            var count = p.member_ids.length;
+            var item = el("li");
+            item.appendChild(el("strong", "party-name", p.name));
+            item.appendChild(el("span", "note", "Main: " + (names[p.main_player_id] || p.main_player_id) +
+                " + " + count + (count === 1 ? " speaker" : " speakers") +
+                ", grouped by " + GROUPINGS[p.grouping]));
+            var shown = "";
+            if (!names[p.main_player_id]) {
+                shown = "Not in the Qobuz app: Music Assistant no longer has its main speaker.";
+            } else if (!p.speaker_name) {
+                shown = "Not in the Qobuz app";
+            } else if (p.speaker_name !== p.name) {
+                shown = "Shows as “" + p.speaker_name + "”";
+            }
+            if (shown) item.appendChild(el("span", "note", shown));
+            if (p.problem) item.appendChild(el("span", "warning", p.problem));
+            var buttons = el("div", "party-buttons");
+            buttons.appendChild(linkButton("Edit", function () {
+                openPartyForm(p);
+            }));
+            buttons.appendChild(linkButton("Delete", function () {
+                onDeleteParty(p);
+            }));
+            item.appendChild(buttons);
+            list.appendChild(item);
+        });
+        show(list, true);
+        show($("party-add"), status.players.length > 0);
+        $("party-empty").textContent = status.players.length ? "" :
+            "Connect to Music Assistant to add a party speaker.";
+        show($("party-empty"), !status.players.length);
+    }
+
+    function linkButton(text, onClick) {
+        var button = el("button", "link-button", text);
+        button.type = "button";
+        button.addEventListener("click", onClick);
+        return button;
+    }
+
+    function option(value, text) {
+        var node = el("option", "", text);
+        node.value = value;
+        return node;
+    }
+
+    function choice(name) {
+        var checked = $("party-form").querySelector('input[name="' + name + '"]:checked');
+        return checked ? checked.value : "";
+    }
+
+    function setChoice(name, value) {
+        $("party-form").querySelectorAll('input[name="' + name + '"]').forEach(function (input) {
+            input.checked = input.value === value;
+        });
+    }
+
+    // p: the party speaker to edit, or null to add one
+    function openPartyForm(p) {
+        party = {
+            id: p ? p.party_id : "",
+            members: { music_assistant: [], home_assistant: [] }, // ticked, kept per grouping
+            mainEntityId: p ? p.main_entity_id : "",
+            homeAssistantPlayers: null, // fetched when Home Assistant is picked
+            homeAssistantError: "",
+        };
+        if (p) party.members[p.grouping] = p.member_ids.slice();
+        $("party-form").reset(); // the choices the page starts with are the defaults
+        $("party-form-title").textContent = p ? "Edit “" + p.name + "”" : "Add a party speaker";
+        $("party-name").value = p ? p.name : "";
+        var main = $("party-main");
+        main.textContent = "";
+        main.appendChild(option("", "Pick a speaker"));
+        last.players.forEach(function (player) {
+            main.appendChild(option(player.player_id, player.name));
+        });
+        if (p && !last.players.some(function (player) { return player.player_id === p.main_player_id; })) {
+            main.appendChild(option(p.main_player_id, p.main_player_id)); // gone from Music Assistant
+        }
+        main.value = p ? p.main_player_id : "";
+        $("party-main-entity").textContent = ""; // filled once Home Assistant's players are in
+        $("party-grouping-home-assistant").disabled = !last.home_assistant_available;
+        show($("party-home-assistant-note"), !last.home_assistant_available);
+        if (p) {
+            setChoice("party-grouping", p.grouping);
+            setChoice("party-busy", p.busy_speakers);
+            setChoice("party-after", p.after_party);
+            setChoice("party-leave", p.on_leave);
+        }
+        show($("party-error"), false);
+        show($("party-form-error"), false);
+        show($("party-edit-note"), !!p);
+        show($("party-speakers"), false);
+        show($("party-add"), false);
+        show($("party-form"), true);
+        onGroupingPicked();
+        $("party-name").focus();
+    }
+
+    function closePartyForm() {
+        party = null;
+        show($("party-form"), false);
+        drawParties(last);
+    }
+
+    function onGroupingPicked() {
+        if (choice("party-grouping") === "home_assistant" && !party.homeAssistantPlayers) {
+            loadHomeAssistantPlayers();
+        }
+        drawPartyMembers();
+    }
+
+    function loadHomeAssistantPlayers() {
+        var form = party;
+        form.homeAssistantError = "";
+        request("GET", "api/music-assistant/home-assistant-players").then(function (data) {
+            form.homeAssistantPlayers = data.players.filter(function (p) {
+                return p.can_group;
+            });
+        }, function (error) {
+            form.homeAssistantError = error.message;
+        }).then(function () {
+            if (party !== form) return;
+            fillMainEntity();
+            drawPartyMembers();
+        });
+    }
+
+    // The main speaker as Home Assistant knows it; guessed from the main speaker's name
+    function fillMainEntity() {
+        var players = party.homeAssistantPlayers || [];
+        var select = $("party-main-entity");
+        select.textContent = "";
+        select.appendChild(option("", "Pick a speaker"));
+        players.forEach(function (p) {
+            select.appendChild(option(p.entity_id, p.name + " (" + p.entity_id + ")"));
+        });
+        var id = party.mainEntityId;
+        if (!id) {
+            var main = $("party-main").selectedOptions[0];
+            var name = main && main.value ? main.textContent.toLowerCase() : "";
+            var same = players.filter(function (p) {
+                return p.name.toLowerCase() === name;
+            });
+            if (same.length === 1) id = party.mainEntityId = same[0].entity_id;
+        }
+        if (id && !players.some(function (p) { return p.entity_id === id; })) {
+            select.appendChild(option(id, id));
+        }
+        select.value = id;
+    }
+
+    function drawPartyMembers() {
+        var homeAssistant = choice("party-grouping") === "home_assistant";
+        show($("party-main-entity-field"), homeAssistant);
+        var list = $("party-members");
+        list.textContent = "";
+        var note = homeAssistant ? drawHomeAssistantMembers(list) : drawMusicAssistantMembers(list);
+        $("party-members-note").textContent = note;
+        show($("party-members-note"), !!note);
+    }
+
+    function memberChoice(id, name, detail, ticked, disabled) {
+        var box = el("input");
+        box.type = "checkbox";
+        box.value = id;
+        box.disabled = disabled;
+        box.checked = ticked && !disabled;
+        var text = el("span");
+        text.appendChild(el("span", "", name));
+        if (detail) text.appendChild(el("span", "note", detail));
+        var label = el("label", "choice");
+        label.appendChild(box);
+        label.appendChild(text);
+        var item = el("li");
+        item.appendChild(label);
+        return item;
+    }
+
+    // Returns a note for under the list, or ""
+    function drawMusicAssistantMembers(list) {
+        var mainId = $("party-main").value;
+        var main = last.players.filter(function (p) {
+            return p.player_id === mainId;
+        })[0];
+        var syncsWith = main ? main.can_group_with : []; // empty: Music Assistant does not say
+        var ticked = party.members.music_assistant;
+        last.players.forEach(function (p) {
+            if (p.player_id === mainId) return;
+            var cannot = syncsWith.length > 0 && syncsWith.indexOf(p.player_id) < 0;
+            list.appendChild(memberChoice(p.player_id, p.name, cannot ? "can't sync with " + main.name : "",
+                ticked.indexOf(p.player_id) >= 0, cannot));
+        });
+        return list.children.length ? "" : "Music Assistant has no other players.";
+    }
+
+    function drawHomeAssistantMembers(list) {
+        var players = party.homeAssistantPlayers;
+        if (!players) return party.homeAssistantError || "Loading the speakers in Home Assistant…";
+        var mainId = $("party-main-entity").value;
+        var ticked = party.members.home_assistant;
+        players.forEach(function (p) {
+            if (p.entity_id === mainId) return;
+            list.appendChild(memberChoice(p.entity_id, p.name, p.entity_id, ticked.indexOf(p.entity_id) >= 0, false));
+        });
+        // Ones it had before that Home Assistant can't group now: shown, so they can be taken off
+        ticked.forEach(function (id) {
+            if (id === mainId || players.some(function (p) { return p.entity_id === id; })) return;
+            list.appendChild(memberChoice(id, id, "Home Assistant can't group it now", true, false));
+        });
+        return list.children.length ? "" : "Home Assistant has no other speakers that can group.";
+    }
+
+    function onMemberTicked(event) {
+        var box = event.target;
+        var ticked = party.members[choice("party-grouping")];
+        var at = ticked.indexOf(box.value);
+        if (box.checked && at < 0) ticked.push(box.value);
+        if (!box.checked && at >= 0) ticked.splice(at, 1);
+    }
+
+    function onMainEntityPicked() {
+        party.mainEntityId = $("party-main-entity").value;
+        drawPartyMembers();
+    }
+
+    function onSaveParty(event) {
+        event.preventDefault();
+        var form = party;
+        var grouping = choice("party-grouping");
+        var body = {
+            name: $("party-name").value.trim(),
+            main_player_id: $("party-main").value,
+            grouping: grouping,
+            member_ids: Array.prototype.map.call($("party-members").querySelectorAll("input:checked"),
+                function (box) {
+                    return box.value;
+                }),
+            busy_speakers: choice("party-busy"),
+            after_party: choice("party-after"),
+            on_leave: choice("party-leave"),
+        };
+        if (grouping === "home_assistant") body.main_entity_id = $("party-main-entity").value;
+        var sent = form.id
+            ? send("PUT", "api/music-assistant/party-speakers/" + encodeURIComponent(form.id), body,
+                $("party-form-error"))
+            : send("POST", "api/music-assistant/party-speakers", body, $("party-form-error"));
+        $("party-save").disabled = true;
+        sent.then(function () {
+            if (party === form) closePartyForm();
+        }, function () {}).then(function () {
+            $("party-save").disabled = false;
+        });
+    }
+
+    function onDeleteParty(p) {
+        if (window.confirm("Delete the party speaker “" + p.name + "”? It disappears from the Qobuz app " +
+                "at once.")) {
+            send("DELETE", "api/music-assistant/party-speakers/" + encodeURIComponent(p.party_id), undefined,
+                $("party-error")).catch(function () {});
+        }
+    }
+
     function render(status) {
         last = status;
         renderChecks(status);
         renderQobuz(status);
         renderMusicAssistant(status);
         renderPlayers(status);
+        renderParties(status);
     }
 
     function poll() {
@@ -359,6 +645,17 @@
     $("music-assistant-disconnect").addEventListener("click", onDisconnect);
     $("expose-all").addEventListener("change", onExposeAll);
     $("players").addEventListener("change", onPlayerTicked);
+    $("party-add").addEventListener("click", function () {
+        openPartyForm(null);
+    });
+    $("party-form").addEventListener("submit", onSaveParty);
+    $("party-cancel").addEventListener("click", closePartyForm);
+    $("party-main").addEventListener("change", drawPartyMembers);
+    $("party-form").querySelectorAll('input[name="party-grouping"]').forEach(function (input) {
+        input.addEventListener("change", onGroupingPicked);
+    });
+    $("party-main-entity").addEventListener("change", onMainEntityPicked);
+    $("party-members").addEventListener("change", onMemberTicked);
     // Coming back from the Qobuz login tab: refresh right away
     window.addEventListener("focus", poll);
     document.addEventListener("visibilitychange", poll);

@@ -71,6 +71,18 @@ async def test_a_volume_change_in_music_assistant_shows_in_the_app_only_while_th
     assert 70 not in rig.cloud.volumes
 
 
+async def test_leaving_a_speaker_in_the_app_tells_its_backend_once_the_music_has_stopped(rig):
+    states_when_left = []
+    rig.speaker._backend.app_left = lambda: states_when_left.append(rig.queue_state())
+    await rig.play_album(0)
+
+    await rig.deliver(set_active(False))  # the app now plays on another device
+    await rig.wait_for(lambda: states_when_left, "the backend heard the app left")
+    await rig.deliver(set_active(False), set_active(True))  # left and picked again at once
+
+    assert states_when_left == [MusicAssistantState.IDLE]
+
+
 async def test_playing_from_a_position_starts_music_assistant_there_without_a_seek(rig):
     await rig.deliver(album_state(0, APP_PLAYING, pos=61_000))
     await rig.wait_for(

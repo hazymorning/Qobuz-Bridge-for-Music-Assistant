@@ -66,10 +66,70 @@ The top of the panel says what is wrong and what to do:
   exactly as you type it); clear the name to get the default back.
 - Each speaker keeps its identity across restarts and renames, so the Qobuz app remembers it. A
   new name (yours, or the player's in Music Assistant) applies once the speaker is not playing.
-- A party speaker: make a group player in Music Assistant with all the speakers that should play
-  together. It shows up as its own speaker in the Qobuz app; rename it to "Party" if you like.
+- Party speakers you add in the panel show up too, under their own names (see below).
 - After a Music Assistant restart players can take a while to come back; their speakers are kept
   for 30 minutes.
+
+## Party speakers
+
+There are two ways to play on several speakers at once from the Qobuz app:
+
+- **A group player in Music Assistant.** Make it in Music Assistant with all the speakers that
+  should play together. It shows up as its own speaker (rename it to "Party" if you like) and
+  Music Assistant runs the whole group. Pick this when Music Assistant can sync all the speakers
+  and you always want the same ones.
+- **A party speaker in the panel.** It plays on one main speaker, and the speakers you pick join
+  that speaker's group right before the music starts and leave again when you say so. Music
+  Assistant or Home Assistant does the grouping. Pick this when only the speakers' own multiroom
+  can sync them, or when you want to decide what happens to speakers that are already playing
+  and when the group splits.
+
+To add a party speaker, tap **Add a party speaker** under **4. Party speakers**:
+
+- **Name in the Qobuz app:** used exactly as you type it (up to 40 characters, no "(MA)" added).
+- **Main speaker (plays the music):** the Music Assistant player the music plays on; the others
+  join it. The party speaker shows up in the Qobuz app whether or not this player is ticked under
+  **Speakers in the Qobuz app**.
+- **Group with:** **Music Assistant** or **Home Assistant**:
+  - **Music Assistant** syncs the speakers itself. Pick it when Music Assistant can sync them
+    with the main speaker, usually players of the same kind in Music Assistant. Speakers it
+    can't sync with the main speaker are greyed out ("can't sync with …").
+  - **Home Assistant** asks Home Assistant to group them, which uses the speakers' own
+    multiroom (Sonos, WiiM and the like). Pick it when Music Assistant can't sync them but their
+    own app can. The form lists only Home Assistant media players that can be grouped, and they
+    must be able to group with the main speaker (usually the same brand). This uses the add-on's
+    access to Home Assistant, new in 0.4.0.
+- **Main speaker in Home Assistant** (Home Assistant only): the main speaker as Home Assistant
+  knows it, the one the others join. Pick the same speaker as the main speaker above; the form
+  picks it for you when Home Assistant has a speaker with the same name.
+- **Speakers that join:** the speakers that join the main speaker.
+- **Speakers already playing something else:** **Bring them into the party** stops their music
+  and groups them. **Leave them playing** leaves them out of this party.
+- **When the music stops:** you press stop (in the Qobuz app or Music Assistant), the queue ends,
+  Music Assistant can't be reached or someone plays something else on the main speaker in Music
+  Assistant. **Split the group again**: once the music has been stopped for 5 seconds, the
+  speakers the party brought in leave the group. **Keep the speakers together**: they stay
+  grouped. A pause or the next track never splits the group.
+- **When you switch to another device in the Qobuz app** (or the app disconnects): the party's
+  music stops either way. **Stop and split the group**: the speakers leave the group at once.
+  **Stop and keep the speakers together**: they stay grouped. This does not depend on **When the
+  music stops**.
+
+Good to know:
+
+- Only the speakers the party brought in leave the group; speakers that were already grouped with
+  the main speaker stay.
+- If a speaker can't join, the music still starts on the main speaker and the party speaker's row
+  in the panel says why (details in the **Log** tab).
+- A change to a party speaker applies once its music stops. Deleting one takes it out of the
+  Qobuz app at once; music that plays keeps playing in Music Assistant and the group stays.
+- A group a party made before an add-on restart is not split by the add-on after the restart.
+- When both options keep the speakers together, they are grouped once: if you split them
+  yourself, the party groups them again only once it restarts (after an add-on restart or a
+  change to the party speaker).
+- Known limit: two party speakers with the same main speaker and some of the same speakers can get
+  in each other's way when you switch straight from one to the other, and a shared speaker can
+  drop out of the new party. Give them different speakers to join.
 
 ## While you play
 
@@ -107,6 +167,9 @@ after changing it.
 
 Your Qobuz login and the Music Assistant token are stored only in the add-on's storage (`/data`),
 never in the log. They are part of Home Assistant backups of the add-on.
+
+The add-on's access to Home Assistant is used only for party speakers grouped by Home Assistant:
+it reads your media players and groups and ungroups the speakers you picked.
 
 ## Troubleshooting
 

@@ -1,10 +1,10 @@
 """
 Qobuz Connect speakers for Music Assistant players.
 
-Runs the shared MA connection and one Speaker per exposed MA player or group.
-Each speaker's UUID comes from the MA player id and its discovery port is kept
-in the settings, so the Qobuz app sees the same speakers after a restart, even
-before MA answers.
+Runs the shared MA connection and one Speaker per exposed MA player or group,
+plus one per party speaker. Each speaker's UUID comes from the MA player id (or
+the party id) and its discovery port is kept in the settings, so the Qobuz app
+sees the same speakers after a restart, even before MA answers.
 
 Imports without the music-assistant extra (Python < 3.13); MA support then
 stays off and the web UI says why.
@@ -14,9 +14,11 @@ import asyncio
 import contextlib
 import itertools
 import logging
+import secrets
 import socket
 import time
 import uuid
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -24,10 +26,20 @@ from qobuz_proxy.backends.base import AudioBackend
 from qobuz_proxy.config import _SPEAKER_UUID_NAMESPACE, SpeakerConfig, slugify_name
 
 from . import LoginError, settings
-from .settings import DEFAULT_URL, KnownPlayer
+from .home_assistant import NOT_AVAILABLE, HomeAssistant
+from .settings import (
+    AFTER_PARTY,
+    BUSY_SPEAKERS,
+    DEFAULT_URL,
+    GROUPINGS,
+    ON_LEAVE,
+    KnownPlayer,
+    PartySpeaker,
+)
 
 if TYPE_CHECKING:
     from .connection import MusicAssistantConnection
+    from .party import Party
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +52,25 @@ MISSING_PLAYER_GRACE_SECONDS = 1800.0
 START_RETRY_DELAYS_SECONDS = (10.0, 30.0, 60.0, 300.0)
 CONNECT_WAIT_SECONDS = 5.0
 PLAYER_EVENTS = {"player_added", "player_removed", "player_updated", "player_config_updated"}
+PARTY = "party:"  # speaker key of a party speaker: PARTY + its party id
+PARTY_FIELDS = {
+    "name": str,
+    "main_player_id": str,
+    "grouping": str,
+    "member_ids": list,
+    "main_entity_id": str,
+    "busy_speakers": str,
+    "after_party": str,
+    "on_leave": str,
+}
+ENTITY_ID_MAX_LENGTH = 255
 
 SpeakerFactory = Callable[[SpeakerConfig, AudioBackend], Any]
 
 
-def speaker_uuid(player_id: str) -> str:
-    """Speaker UUID for an MA player; independent of names and hostname."""
-    return str(uuid.uuid5(_SPEAKER_UUID_NAMESPACE, f"music_assistant:{player_id}"))
+def speaker_uuid(key: str) -> str:
+    """Speaker UUID for an MA player id or a party key; independent of names and hostname."""
+    return str(uuid.uuid5(_SPEAKER_UUID_NAMESPACE, f"music_assistant:{key}"))
 
 
 def normalize_url(url: str) -> str:
@@ -68,7 +92,10 @@ def port_is_free(bind_address: str, port: int) -> bool:
 
 
 class MusicAssistantSpeakers:
-    """Runs the MA connection and one speaker per exposed MA player."""
+    """Runs the MA connection and one speaker per exposed MA player and per party speaker.
+
+    Speakers are keyed by the MA player id, or PARTY + the party id.
+    """
 
     def __init__(
         self,
@@ -77,12 +104,14 @@ class MusicAssistantSpeakers:
         bind_address: str = "0.0.0.0",
         client_factory: Optional[Callable[..., Any]] = None,
         port_is_free: Callable[[str, int], bool] = port_is_free,
+        home_assistant: Optional[HomeAssistant] = None,
     ) -> None:
         self._settings_path = settings_path
         self._make_speaker = make_speaker
         self._bind_address = bind_address
         self._client_factory = client_factory
         self._port_is_free = port_is_free
+        self._home_assistant = home_assistant or HomeAssistant()
 
         self._settings = settings.Settings()
         self._unsupported_reason = ""  # why MA support is off, if it is
@@ -90,6 +119,7 @@ class MusicAssistantSpeakers:
         self._is_qobuz_logged_in = False
         self._speakers: dict[str, Any] = {}
         self._running_configs: dict[str, SpeakerConfig] = {}
+        self._parties: dict[str, "Party"] = {}  # of the running party speakers
         self._retry_tasks: dict[str, asyncio.Task[None]] = {}
         self._missing_since: dict[str, float] = {}
         self._lock = asyncio.Lock()
@@ -221,9 +251,7 @@ class MusicAssistantSpeakers:
             raise ValueError(f"Keep the name to {NAME_MAX_LENGTH} characters.")
         if not name.isprintable():
             raise ValueError("The name can only have letters, numbers, spaces and punctuation.")
-        others = [c.name for i, c in self._wanted_speakers().items() if i != player_id]
-        others += [n for i, n in self._settings.speaker_names.items() if i != player_id]
-        if name and slugify_name(name) in {slugify_name(other) for other in others}:
+        if name and slugify_name(name) in self._names_in_use(except_key=player_id):
             raise ValueError(f"Another speaker is already called “{name}”.")
         if name:
             self._settings.speaker_names[player_id] = name
@@ -235,6 +263,162 @@ class MusicAssistantSpeakers:
             + (name or "the default")
         )
         await self.update_speakers()
+
+    async def add_party_speaker(self, **fields: Any) -> str:
+        """Add a party speaker to the Qobuz app; returns its party id.
+
+        ``fields``: any of PARTY_FIELDS; the others get their defaults.
+
+        Raises:
+            ValueError: with a message for the web UI.
+        """
+        party_id = secrets.token_hex(4)
+        while party_id in self._settings.party_speakers:
+            party_id = secrets.token_hex(4)
+        defaults = asdict(PartySpeaker(name="", main_player_id="", http_port=0))
+        values = self._checked_party_speaker(PARTY + party_id, defaults, fields)
+        party = PartySpeaker(**values, http_port=self._free_port())
+        self._settings.party_speakers[party_id] = party
+        self._save()
+        logger.info(f"Added the party speaker {party.name}")
+        await self.update_speakers()
+        return party_id
+
+    async def update_party_speaker(self, party_id: str, **fields: Any) -> None:
+        """Change some of a party speaker's PARTY_FIELDS; its speaker restarts once idle.
+
+        Raises:
+            ValueError: with a message for the web UI.
+        """
+        current = self._settings.party_speakers.get(party_id)
+        if current is None:
+            raise ValueError("That party speaker is not there any more.")
+        values = self._checked_party_speaker(PARTY + party_id, asdict(current), fields)
+        party = PartySpeaker(**values, http_port=current.http_port)
+        self._settings.party_speakers[party_id] = party
+        self._save()
+        logger.info(f"Changed the party speaker {party.name}")
+        await self.update_speakers()
+
+    async def remove_party_speaker(self, party_id: str) -> None:
+        """Take a party speaker out of the Qobuz app for good.
+
+        Raises:
+            ValueError: with a message for the web UI.
+        """
+        party = self._settings.party_speakers.pop(party_id, None)
+        if party is None:
+            raise ValueError("That party speaker is not there any more.")
+        self._settings.sessions.pop(PARTY + party_id, None)
+        self._save()
+        logger.info(f"Removed the party speaker {party.name}")
+        await self.update_speakers()
+
+    async def home_assistant_players(self) -> list[dict[str, Any]]:
+        """Home Assistant's media players, for the party speaker form.
+
+        Raises:
+            HomeAssistantError: with a message for the web UI, also outside Home Assistant.
+        """
+        players = await self._home_assistant.media_players()
+        return [
+            {"entity_id": p.entity_id, "name": p.name, "can_group": p.can_group}
+            for p in sorted(players, key=lambda p: (p.name.lower(), p.entity_id))
+        ]
+
+    def _checked_party_speaker(
+        self, key: str, current: dict[str, Any], fields: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``current`` with ``fields`` applied, checked; every PARTY_FIELDS value but the port.
+
+        Raises:
+            ValueError: with a message for the web UI.
+        """
+        for field_name, value in fields.items():
+            kind = PARTY_FIELDS.get(field_name)
+            if (
+                kind is None
+                or not isinstance(value, kind)
+                or (isinstance(value, list) and not all(isinstance(v, str) for v in value))
+            ):
+                raise ValueError(f"Invalid field: {field_name}"[:100])
+        merged = {**current, **fields}
+        values = {field_name: merged[field_name] for field_name in PARTY_FIELDS}
+        name = values["name"] = " ".join(values["name"].split())
+        if not name:
+            raise ValueError("Give the party speaker a name.")
+        if len(name) > NAME_MAX_LENGTH:
+            raise ValueError(f"Keep the name to {NAME_MAX_LENGTH} characters.")
+        if not name.isprintable():
+            raise ValueError("The name can only have letters, numbers, spaces and punctuation.")
+        if slugify_name(name) in self._names_in_use(except_key=key):
+            raise ValueError(f"Another speaker is already called “{name}”.")
+        main_id = values["main_player_id"]
+        if not main_id:
+            raise ValueError("Pick the speaker that plays the music.")
+        if main_id not in self._settings.known_players:
+            raise ValueError("That Music Assistant player is not known (any more).")
+        for field_name, allowed, problem in [
+            ("grouping", GROUPINGS, "Pick who groups the speakers."),
+            ("busy_speakers", BUSY_SPEAKERS, "Pick what happens to speakers already playing."),
+            ("after_party", AFTER_PARTY, "Pick what happens when the music stops."),
+            ("on_leave", ON_LEAVE, "Pick what happens when you switch to another device."),
+        ]:
+            if values[field_name] not in allowed:
+                raise ValueError(problem)
+        members = values["member_ids"] = list(dict.fromkeys(values["member_ids"]))
+        if not members:
+            raise ValueError("Pick at least one speaker to join the party.")
+        if values["grouping"] == "home_assistant":
+            self._check_home_assistant_members(values["main_entity_id"], members)
+        else:
+            values["main_entity_id"] = ""
+            self._check_music_assistant_members(main_id, members)
+        return values
+
+    def _check_music_assistant_members(self, main_id: str, member_ids: list[str]) -> None:
+        if main_id in member_ids:
+            raise ValueError("The main speaker can't also be one that joins.")
+        if any(member_id not in self._settings.known_players for member_id in member_ids):
+            raise ValueError("That Music Assistant player is not known (any more).")
+        main = self._connection.player(main_id) if self._connection is not None else None
+        can_group_with = main.can_group_with if main is not None else set()
+        for member_id in member_ids:
+            if can_group_with and member_id not in can_group_with:
+                known = self._settings.known_players
+                raise ValueError(
+                    f"{known[member_id].name} can't sync with {known[main_id].name} in Music "
+                    "Assistant."
+                )
+
+    def _check_home_assistant_members(self, main_entity_id: str, member_ids: list[str]) -> None:
+        if not self._home_assistant.available:
+            raise ValueError(NOT_AVAILABLE)
+
+        def is_media_player(entity_id: str) -> bool:
+            return (
+                entity_id.startswith("media_player.")
+                and len(entity_id) <= ENTITY_ID_MAX_LENGTH
+                and entity_id.isprintable()
+            )
+
+        if not is_media_player(main_entity_id):
+            raise ValueError("Pick the main speaker in Home Assistant.")
+        if not all(is_media_player(entity_id) for entity_id in member_ids):
+            raise ValueError("Pick Home Assistant media players to join.")
+        if main_entity_id in member_ids:
+            raise ValueError("The main speaker can't also be one that joins.")
+
+    def _names_in_use(self, except_key: str) -> set[str]:
+        """Slugs of every speaker name but the one of ``except_key`` (player id or party key)."""
+        names = [c.name for key, c in self._wanted_speakers().items() if key != except_key]
+        names += [n for key, n in self._settings.speaker_names.items() if key != except_key]
+        names += [
+            p.name
+            for party_id, p in self._settings.party_speakers.items()
+            if PARTY + party_id != except_key
+        ]
+        return {slugify_name(name) for name in names}
 
     def status(self) -> dict[str, Any]:
         """What the web UI shows; never the token."""
@@ -260,11 +444,36 @@ class MusicAssistantSpeakers:
                     "speaker_name": wanted[player_id].name if player_id in wanted else "",
                     "custom_name": self._settings.speaker_names.get(player_id, ""),
                     "default_name": p.name + NAME_SUFFIX,
+                    "can_group_with": self._can_group_with(player_id),
                 }
                 for player_id, p in sorted(known.items(), key=lambda kv: kv[1].name.lower())
             ],
+            "party_speakers": [
+                self._party_row(party_id, party, wanted)
+                for party_id, party in sorted(
+                    self._settings.party_speakers.items(), key=lambda kv: kv[1].name.lower()
+                )
+            ],
+            "home_assistant_available": self._home_assistant.available,
             "speaker_count": len(self._speakers),
         }
+
+    def _party_row(
+        self, party_id: str, party: PartySpeaker, wanted: dict[str, SpeakerConfig]
+    ) -> dict[str, Any]:
+        key = PARTY + party_id
+        running = self._parties.get(key)
+        return {
+            "party_id": party_id,
+            **{k: v for k, v in asdict(party).items() if k != "http_port"},
+            "speaker_name": wanted[key].name if key in wanted else "",
+            "problem": running.problem if running is not None else "",
+        }
+
+    def _can_group_with(self, player_id: str) -> list[str]:
+        """The players MA says this one can sync with; empty when MA does not say."""
+        player = self._connection.player(player_id) if self._connection is not None else None
+        return sorted(player.can_group_with) if player is not None else []
 
     def _connection_status(self) -> dict[str, Any]:
         if self._connection is None:
@@ -283,38 +492,35 @@ class MusicAssistantSpeakers:
         }
 
     async def update_speakers(self) -> None:
-        """Start, stop or restart speakers so they match the MA players to expose."""
+        """Start, stop or restart speakers to match the exposed players and the party speakers."""
         async with self._lock:
             self._update_known_players()
             ready = self._is_qobuz_logged_in and self._settings.is_configured and self._connection
             wanted = self._wanted_speakers() if ready else {}
 
-            for player_id, running in list(self._running_configs.items()):
-                want = wanted.get(player_id)
-                if want is not None and (want.name, want.http_port) == (
-                    running.name,
-                    running.http_port,
+            for key, running in list(self._running_configs.items()):
+                want = wanted.get(key)
+                if (
+                    want is not None
+                    and (want.name, want.http_port) == (running.name, running.http_port)
+                    and not self._party_changed(key)
                 ):
                     continue
-                if want is not None and self._is_playing(player_id):
+                if want is not None and self._is_playing(key):
                     continue  # a rename restarts the speaker: wait until it is idle
-                await self._stop_speaker(player_id)
-            for player_id in list(self._retry_tasks):
-                if player_id not in wanted:
-                    self._retry_tasks.pop(player_id).cancel()
+                await self._stop_speaker(key)
+            for key in list(self._retry_tasks):
+                if key not in wanted:
+                    self._retry_tasks.pop(key).cancel()
 
             new = [
-                player_id
-                for player_id in wanted
-                if player_id not in self._speakers and player_id not in self._retry_tasks
+                key for key in wanted if key not in self._speakers and key not in self._retry_tasks
             ]
-            started = await asyncio.gather(
-                *(self._start_speaker(player_id, wanted[player_id]) for player_id in new)
-            )
-            for player_id, ok in zip(new, started):
+            started = await asyncio.gather(*(self._start_speaker(key, wanted[key]) for key in new))
+            for key, ok in zip(new, started):
                 if not ok:
-                    self._retry_tasks[player_id] = asyncio.create_task(
-                        self._retry_start(player_id, wanted[player_id])
+                    self._retry_tasks[key] = asyncio.create_task(
+                        self._retry_start(key, wanted[key])
                     )
 
             names = sorted(c.name for c in wanted.values())
@@ -379,7 +585,10 @@ class MusicAssistantSpeakers:
         return {player_id: p.available for player_id, p in live.items()}
 
     def _wanted_speakers(self) -> dict[str, SpeakerConfig]:
-        """Speaker configs for the players to expose, with unique names."""
+        """Speaker configs for the players to expose and the party speakers, with unique names.
+
+        A party speaker is wanted while its main player is known.
+        """
         known = self._settings.known_players
         if self._settings.expose_all:
             exposed = [player_id for player_id, p in known.items() if not p.hidden]
@@ -387,52 +596,86 @@ class MusicAssistantSpeakers:
             exposed = [
                 player_id for player_id in self._settings.selected_player_ids if player_id in known
             ]
+        wanted = [
+            (
+                player_id,
+                self._settings.speaker_names.get(player_id) or known[player_id].name + NAME_SUFFIX,
+                known[player_id].http_port,
+            )
+            for player_id in sorted(exposed)
+        ]
+        wanted += [
+            (PARTY + party_id, party.name, party.http_port)
+            for party_id, party in sorted(self._settings.party_speakers.items())
+            if party.main_player_id in known
+        ]
         used: set[str] = set()
         configs = {}
-        for player_id in sorted(exposed):
-            base = (
-                self._settings.speaker_names.get(player_id) or known[player_id].name + NAME_SUFFIX
-            )
+        for key, base, port in wanted:
             name, n = base, 2
             while slugify_name(name) in used:
                 name, n = f"{base} {n}", n + 1
             used.add(slugify_name(name))
-            configs[player_id] = SpeakerConfig(
+            configs[key] = SpeakerConfig(
                 name=name,
-                uuid=speaker_uuid(player_id),
+                uuid=speaker_uuid(key),
                 backend_type="music_assistant",
                 max_quality=27,  # MA streams with its own quality; this only checks availability
-                http_port=known[player_id].http_port,
+                http_port=port,
                 bind_address=self._bind_address,
             )
         return configs
 
     def _free_port(self) -> int:
         taken = {p.http_port for p in self._settings.known_players.values()}
+        taken |= {p.http_port for p in self._settings.party_speakers.values()}
         port = FIRST_PORT
         while port in taken or not self._port_is_free(self._bind_address, port):
             port += 1
         return port
 
-    async def _start_speaker(self, player_id: str, config: SpeakerConfig) -> bool:
+    async def _start_speaker(self, key: str, config: SpeakerConfig) -> bool:
         from .backend import MusicAssistantBackend
+        from .party import Party, PartyBackend
 
         assert self._connection is not None  # no speaker is wanted before start() made it
-        backend = MusicAssistantBackend(
-            self._connection,
-            player_id,
-            config.name,
-            session=self._settings.sessions.get(player_id),
-            save_session=lambda session: self._save_session(player_id, session),
-        )
+        session = self._settings.sessions.get(key)
+
+        def save_session(session: Optional[dict[str, Any]]) -> None:
+            self._save_session(key, session)
+
+        party_speaker = self._party_speaker(key)
+        party = None
+        backend: MusicAssistantBackend
+        if party_speaker is None:
+            backend = MusicAssistantBackend(
+                self._connection, key, config.name, session=session, save_session=save_session
+            )
+        else:
+            party = Party(party_speaker, self._connection, self._home_assistant, config.name)
+            backend = PartyBackend(
+                self._connection, party, config.name, session=session, save_session=save_session
+            )
         speaker = self._make_speaker(config, backend)
         if not await speaker.start():
             return False
-        self._speakers[player_id] = speaker
-        self._running_configs[player_id] = config
+        self._speakers[key] = speaker
+        self._running_configs[key] = config
+        if party is not None:
+            self._parties[key] = party
         return True
 
-    async def _retry_start(self, player_id: str, config: SpeakerConfig) -> None:
+    def _party_speaker(self, key: str) -> Optional[PartySpeaker]:
+        if not key.startswith(PARTY):
+            return None
+        return self._settings.party_speakers.get(key[len(PARTY) :])
+
+    def _party_changed(self, key: str) -> bool:
+        """Whether a running party speaker's settings changed since it started."""
+        party = self._parties.get(key)
+        return party is not None and party.party_speaker != self._party_speaker(key)
+
+    async def _retry_start(self, key: str, config: SpeakerConfig) -> None:
         """Keep trying to start a speaker that failed to start (e.g. its port was taken)."""
         try:
             for attempt in itertools.count():
@@ -442,36 +685,37 @@ class MusicAssistantSpeakers:
                 logger.info(f"[{config.name}] Retrying in {delay:.0f}s")
                 await asyncio.sleep(delay)
                 async with self._lock:
-                    if await self._start_speaker(player_id, config):
+                    if await self._start_speaker(key, config):
                         return
         finally:
-            if self._retry_tasks.get(player_id) is asyncio.current_task():
-                del self._retry_tasks[player_id]
+            if self._retry_tasks.get(key) is asyncio.current_task():
+                del self._retry_tasks[key]
 
-    def _is_playing(self, player_id: str) -> bool:
-        return self._speakers[player_id].get_status()["status"] in ("playing", "paused")
+    def _is_playing(self, key: str) -> bool:
+        return self._speakers[key].get_status()["status"] in ("playing", "paused")
 
-    async def _stop_speaker(self, player_id: str) -> None:
-        self._running_configs.pop(player_id)
-        await self._speakers.pop(player_id).stop()
+    async def _stop_speaker(self, key: str) -> None:
+        self._running_configs.pop(key)
+        self._parties.pop(key, None)
+        await self._speakers.pop(key).stop()
 
     async def _stop_all_speakers(self) -> None:
         async with self._lock:
             for task in self._retry_tasks.values():
                 task.cancel()
             self._retry_tasks.clear()
-            for player_id in list(self._speakers):
-                await self._stop_speaker(player_id)
+            for key in list(self._speakers):
+                await self._stop_speaker(key)
             self._logged_speaker_names = []
 
-    def _save_session(self, player_id: str, session: Optional[dict[str, Any]]) -> None:
+    def _save_session(self, key: str, session: Optional[dict[str, Any]]) -> None:
         sessions = self._settings.sessions
-        if sessions.get(player_id) == session:
+        if sessions.get(key) == session:
             return
         if session is None:
-            del sessions[player_id]
+            del sessions[key]
         else:
-            sessions[player_id] = session
+            sessions[key] = session
         self._save()
 
     def _save(self) -> None:

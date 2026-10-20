@@ -348,6 +348,7 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
             )
         self._adopt_position_ms = int(queue.corrected_elapsed_time * 1000)
         self._adopt_seek_until = time.monotonic() + START_GRACE_SECONDS
+        self._connection.continue_item(self._player_id, str(current.queue_item_id), self)
         return self._claim(current, metadata)
 
     async def _jump_to_armed(
@@ -1356,6 +1357,10 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         MA describes the player from its own queue, so another app playing on
         the player directly (e.g. a WiiM's built-in Qobuz Connect) is not
         visible here; the stall check catches it later.
+
+        Not ours either once another speaker on this queue continued the item
+        (the app moved from a party speaker to its main player's speaker or
+        back): our late stop must not stop its music.
         """
         if self._current is None:
             return False
@@ -1365,7 +1370,12 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         ours = {self._current.item_id}
         if self._armed is not None:
             ours.add(self._armed.item_id)
-        return queue.current_item.queue_item_id in ours and queue.state in _PLAYING_OR_PAUSED
+        item_id = queue.current_item.queue_item_id
+        return (
+            item_id in ours
+            and queue.state in _PLAYING_OR_PAUSED
+            and not self._connection.is_continued_by_another(self._player_id, item_id, self)
+        )
 
     def _external_content_playing(self, queue: PlayerQueue) -> bool:
         if not queue.active:

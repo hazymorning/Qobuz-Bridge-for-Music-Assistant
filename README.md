@@ -29,6 +29,9 @@ a Qobuz subscription.
 
 Now open the Qobuz app, tap the device picker and choose a speaker. Their names end in **(MA)**.
 
+For other speakers to join one speaker while you play, add a party speaker under **4. Party
+speakers** in the panel ([how it works](DOCS.md#party-speakers)).
+
 ## Update
 
 When a new version is out, the add-on page in Home Assistant shows an **Update** button. Your
@@ -42,7 +45,8 @@ logins and choices are kept.
   speakers with mDNS.
 - Music Assistant plays the music with its own Qobuz account. A track that account cannot play is
   skipped.
-- The Qobuz app cannot group speakers. Make a group in Music Assistant; it shows up as one speaker.
+- The Qobuz app cannot group speakers. Make a group in Music Assistant or a party speaker in the
+  panel; either shows up as one speaker.
 - When someone plays something else on the player in Music Assistant, the add-on lets go and the
   Qobuz app shows the speaker as stopped.
 - If another app plays directly on the device behind a player (for example a WiiM's own Qobuz

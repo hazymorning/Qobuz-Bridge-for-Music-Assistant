@@ -1,16 +1,20 @@
-"""Web API for the panel: status checks, Music Assistant login, which players are exposed.
+"""Web API for the panel: status checks, Music Assistant login, which players are exposed,
+party speakers.
 
 Responses never include a token or password.
 """
 
 import json
 import socket
+from collections.abc import Mapping
 from typing import Any
 
 from aiohttp import web
 from aiohttp.typedefs import Handler
 
 from qobuz_proxy.backends.music_assistant import LoginError
+from qobuz_proxy.backends.music_assistant.home_assistant import HomeAssistantError
+from qobuz_proxy.backends.music_assistant.speakers import PARTY_FIELDS
 
 
 MAX_FIELD_LENGTH = 1000  # characters in a text field, entries in a list
@@ -111,7 +115,7 @@ def build_checks(qobuz: dict[str, Any], status: dict[str, Any]) -> list[dict[str
     if count:
         noun = "speaker or group is" if count == 1 else "speakers and groups are"
         speakers = ("ok", f"{count} {noun} available in the Qobuz app.")
-    elif ready and any(p["speaker_name"] for p in status["players"]):
+    elif ready and any(s["speaker_name"] for s in status["players"] + status["party_speakers"]):
         speakers = ("pending", "Starting the speakers…")
     elif ready and connected:
         speakers = (
@@ -147,7 +151,7 @@ def _panel_status(request: web.Request) -> dict[str, Any]:
     }
 
 
-async def _read_body(request: web.Request, fields: dict[str, type]) -> dict[str, Any]:
+async def _read_body(request: web.Request, fields: Mapping[str, type]) -> dict[str, Any]:
     """The JSON object body, with only known fields of the right type and size."""
     try:
         body = await request.json()
@@ -209,6 +213,42 @@ async def _handle_players(request: web.Request) -> web.Response:
     return web.json_response(_panel_status(request))
 
 
+async def _handle_add_party_speaker(request: web.Request) -> web.Response:
+    body = await _read_body(request, PARTY_FIELDS)
+    try:
+        await request.app["music_assistant"].add_party_speaker(**body)
+    except ValueError as e:
+        raise _bad_request(str(e)) from None
+    return web.json_response(_panel_status(request))
+
+
+async def _handle_update_party_speaker(request: web.Request) -> web.Response:
+    body = await _read_body(request, PARTY_FIELDS)
+    try:
+        await request.app["music_assistant"].update_party_speaker(
+            request.match_info["party_id"], **body
+        )
+    except ValueError as e:
+        raise _bad_request(str(e)) from None
+    return web.json_response(_panel_status(request))
+
+
+async def _handle_remove_party_speaker(request: web.Request) -> web.Response:
+    try:
+        await request.app["music_assistant"].remove_party_speaker(request.match_info["party_id"])
+    except ValueError as e:
+        raise _bad_request(str(e)) from None
+    return web.json_response(_panel_status(request))
+
+
+async def _handle_home_assistant_players(request: web.Request) -> web.Response:
+    try:
+        players = await request.app["music_assistant"].home_assistant_players()
+    except HomeAssistantError as e:
+        raise _bad_request(str(e)) from None
+    return web.json_response({"players": players})
+
+
 def register_music_assistant_routes(app: web.Application) -> None:
     app.middlewares.append(guard_requests)
     app.router.add_get("/api/music-assistant/status", _handle_status)
@@ -216,3 +256,10 @@ def register_music_assistant_routes(app: web.Application) -> None:
     app.router.add_post("/api/music-assistant/disconnect", _handle_disconnect)
     app.router.add_put("/api/music-assistant/players", _handle_players)
     app.router.add_put("/api/music-assistant/speaker-name", _handle_speaker_name)
+    app.router.add_post("/api/music-assistant/party-speakers", _handle_add_party_speaker)
+    party = "/api/music-assistant/party-speakers/{party_id}"
+    app.router.add_put(party, _handle_update_party_speaker)
+    app.router.add_delete(party, _handle_remove_party_speaker)
+    app.router.add_get(
+        "/api/music-assistant/home-assistant-players", _handle_home_assistant_players
+    )

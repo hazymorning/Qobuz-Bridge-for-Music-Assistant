@@ -1,5 +1,6 @@
-"""Which Music Assistant players appear in the Qobuz app, under which name, uuid and port; how
-that survives restarts, renames, outages and logins; the settings file and the panel status.
+"""Which Music Assistant players and party speakers appear in the Qobuz app, under which name,
+uuid and port; how that survives restarts, renames, outages and logins; the settings file and the
+panel status.
 """
 
 from __future__ import annotations
@@ -19,11 +20,17 @@ from music_assistant_models.enums import PlayerType
 from qobuz_proxy.backends.music_assistant import LoginError, settings
 from qobuz_proxy.backends.music_assistant import speakers as speakers_module
 from qobuz_proxy.backends.music_assistant.backend import MusicAssistantBackend
+from qobuz_proxy.backends.music_assistant.home_assistant import HomeAssistantError, MediaPlayer
+from qobuz_proxy.backends.music_assistant.party import PartyBackend
 from qobuz_proxy.backends.music_assistant.settings import Settings
-from qobuz_proxy.backends.music_assistant.speakers import MusicAssistantSpeakers
+from qobuz_proxy.backends.music_assistant.speakers import (
+    PARTY,
+    MusicAssistantSpeakers,
+    speaker_uuid,
+)
 from qobuz_proxy.config import SpeakerConfig
 from tests.fake_music_assistant import ADMIN_PASSWORD, FakeMusicAssistantServer
-from tests.rig import KITCHEN, idle, wait_for
+from tests.rig import KITCHEN, FakeHomeAssistant, idle, wait_for
 
 EXPOSED = {KITCHEN, "group", "pair"}
 BIND_ADDRESS = "192.0.2.10"  # the address the add-on is set to listen on
@@ -38,14 +45,17 @@ class FakeSpeaker:
         self.add_on = add_on
         self.config = config
         self.backend = backend
-        self.player_id = backend.player_id
+        self.key = backend.player_id  # the player id, or PARTY + the party id
+        if isinstance(backend, PartyBackend):
+            parties = add_on.saved().party_speakers
+            self.key = next(PARTY + i for i in parties if speaker_uuid(PARTY + i) == config.uuid)
         self.status = "idle"
         self.running = False
 
     async def start(self) -> bool:
-        self.add_on.starts.append(self.player_id)
-        if self.add_on.failing_starts.get(self.player_id, 0):
-            self.add_on.failing_starts[self.player_id] -= 1
+        self.add_on.starts.append(self.key)
+        if self.add_on.failing_starts.get(self.key, 0):
+            self.add_on.failing_starts[self.key] -= 1
             return False
         self.running = True
         return True
@@ -64,10 +74,11 @@ class AddOn:
         self.server = server
         self.path = path
         self.busy_ports: set[int] = set()
-        self.failing_starts: dict[str, int] = {}  # player id -> starts that fail
-        self.starts: list[str] = []  # player id of every start attempt
+        self.failing_starts: dict[str, int] = {}  # speaker key -> starts that fail
+        self.starts: list[str] = []  # speaker key of every start attempt
         self.built: list[FakeSpeaker] = []
         self.runs: list[MusicAssistantSpeakers] = []
+        self.home_assistant = FakeHomeAssistant()
 
     async def start(self, *, qobuz_logged_in: bool = True) -> MusicAssistantSpeakers:
         music_assistant = MusicAssistantSpeakers(
@@ -76,6 +87,7 @@ class AddOn:
             bind_address=BIND_ADDRESS,
             client_factory=self.server.client_factory,
             port_is_free=lambda _address, port: port not in self.busy_ports,
+            home_assistant=self.home_assistant,
         )
         self.runs.append(music_assistant)
         await music_assistant.start()
@@ -95,19 +107,19 @@ class AddOn:
 
     def _running(self) -> dict[str, FakeSpeaker]:
         running = [s for s in self.built if s.running]
-        ids = [s.player_id for s in running]
-        assert len(ids) == len(set(ids)), f"two speakers for one player: {sorted(ids)}"
-        return {s.player_id: s for s in running}
+        keys = [s.key for s in running]
+        assert len(keys) == len(set(keys)), f"two speakers for one player: {sorted(keys)}"
+        return {s.key: s for s in running}
 
     def listed(self) -> dict[str, str]:
-        """Player id -> speaker name, for every speaker the Qobuz app lists now."""
-        return {player_id: s.config.name for player_id, s in self._running().items()}
+        """Speaker key -> speaker name, for every speaker the Qobuz app lists now."""
+        return {key: s.config.name for key, s in self._running().items()}
 
     def ports(self) -> dict[str, int]:
-        return {player_id: s.config.http_port for player_id, s in self._running().items()}
+        return {key: s.config.http_port for key, s in self._running().items()}
 
-    def speaker(self, player_id: str) -> FakeSpeaker:
-        return self._running()[player_id]
+    def speaker(self, key: str) -> FakeSpeaker:
+        return self._running()[key]
 
     def saved(self) -> Settings:
         return settings.load(self.path)
@@ -115,8 +127,8 @@ class AddOn:
     async def wait_for(self, condition: Callable[[], Any], what: str) -> None:
         await wait_for(condition, what, server=self.server)
 
-    async def wait_until_listed(self, player_ids: set[str]) -> None:
-        await self.wait_for(lambda: set(self.listed()) == player_ids, f"{sorted(player_ids)}")
+    async def wait_until_listed(self, keys: set[str]) -> None:
+        await self.wait_for(lambda: set(self.listed()) == keys, f"{sorted(keys)}")
 
     async def idle(self, seconds: float) -> None:
         await idle(self.server, seconds)
@@ -325,6 +337,9 @@ async def test_a_player_removed_from_music_assistant_stays_for_a_grace_period_th
     settings.save(add_on.path, replace(add_on.saved(), sessions={"pair": SESSION}))
     music_assistant = await add_on.start()
     await add_on.wait_until_listed(EXPOSED)
+    party_id = await music_assistant.add_party_speaker(
+        name="Bedroom party", main_player_id="pair", member_ids=[KITCHEN]
+    )
 
     server.remove_player("pair")
     await add_on.idle(0.05)
@@ -333,9 +348,12 @@ async def test_a_player_removed_from_music_assistant_stays_for_a_grace_period_th
 
     await add_on.idle(0.3)
     server.set_player_volume(KITCHEN, 25)  # any later Music Assistant event checks again
-    await add_on.wait_until_listed({KITCHEN, "group"})
+    await add_on.wait_until_listed({KITCHEN, "group"})  # and the party it played gone with it
     saved = add_on.saved()
     assert "pair" not in saved.known_players and "pair" not in saved.sessions
+    assert party_id in saved.party_speakers  # until the user deletes it, keeping its name
+    with pytest.raises(ValueError, match="already called"):
+        await music_assistant.set_speaker_name(KITCHEN, "Bedroom party")
 
 
 async def test_a_speaker_that_fails_to_start_is_retried_and_never_doubled(
@@ -424,6 +442,151 @@ async def test_login_problems_come_back_as_plain_messages_and_save_nothing(serve
     connection = music_assistant.status()["connection"]
     # The panel still offers the usual address for the next try
     assert (connection["state"], connection["url"]) == ("not_configured", "http://127.0.0.1:8095")
+
+
+async def test_a_party_speaker_appears_under_its_name_with_its_own_uuid_and_port_after_restarts(
+    server, add_on
+):
+    music_assistant = await add_on.start()
+    await add_on.wait_until_listed(EXPOSED)
+    party_id = await music_assistant.add_party_speaker(
+        name=" Garden   party ", main_player_id=KITCHEN, member_ids=["pair"]
+    )
+    party = PARTY + party_id
+
+    assert add_on.listed()[party] == "Garden party"  # as typed, without " (MA)"
+    config = add_on.speaker(party).config
+    assert config.uuid == speaker_uuid(party)
+    assert config.http_port not in {p.http_port for p in add_on.saved().known_players.values()}
+    await add_on.speaker(party).backend.party.gather()  # as its first play does
+    assert music_assistant.status()["party_speakers"] == [
+        {
+            "party_id": party_id,
+            "name": "Garden party",
+            "main_player_id": KITCHEN,
+            "grouping": "music_assistant",
+            "member_ids": ["pair"],
+            "main_entity_id": "",
+            "busy_speakers": "join",
+            "after_party": "split",
+            "on_leave": "split",
+            "speaker_name": "Garden party",
+            "problem": "Bedroom pair could not join: Player Kitchen does not support group "
+            "commands.",
+        }
+    ]
+
+    server.add_player("up3", "Bathroom")
+    await add_on.wait_until_listed(EXPOSED | {party, "up3"})
+    assert len(set(add_on.ports().values())) == len(EXPOSED) + 2
+
+    # It stays while its main player is known, whichever players are ticked
+    await music_assistant.set_exposed_players(expose_all=False, selected=[])
+    await add_on.stop()  # and the add-on restarts
+    await add_on.start()
+    await add_on.wait_until_listed({party})
+    assert (add_on.speaker(party).config.uuid, add_on.ports()) == (config.uuid, {party: 8704})
+
+
+async def test_a_changed_party_speaker_restarts_once_its_music_stops_and_a_deleted_one_goes(
+    server, add_on
+):
+    music_assistant = await add_on.start()
+    await add_on.wait_until_listed(EXPOSED)
+    party_id = await music_assistant.add_party_speaker(
+        name="Party", main_player_id=KITCHEN, member_ids=["pair"]
+    )
+    party = PARTY + party_id
+    speaker = add_on.speaker(party)
+    speaker.status = "playing"
+    speaker.backend._save_session_callback(SESSION)
+
+    await music_assistant.update_party_speaker(party_id, member_ids=["hidden"], on_leave="keep")
+    assert add_on.speaker(party) is speaker  # a change restarts the speaker: not mid-song
+    speaker.status = "idle"
+    server.set_player_volume(KITCHEN, 20)  # any Music Assistant event checks again
+    await add_on.wait_for(
+        lambda: party in add_on.listed() and add_on.speaker(party) is not speaker, "a restart"
+    )
+    changed = add_on.speaker(party)
+    assert changed.backend.party.party_speaker.member_ids == ["hidden"]
+    assert (changed.config.uuid, changed.config.http_port) == (
+        speaker.config.uuid,
+        speaker.config.http_port,
+    )
+    assert changed.backend._saved_session == SESSION
+
+    await music_assistant.remove_party_speaker(party_id)
+    assert set(add_on.listed()) == EXPOSED
+    assert (add_on.saved().party_speakers, add_on.saved().sessions) == ({}, {})
+    with pytest.raises(ValueError, match="not there any more"):
+        await music_assistant.update_party_speaker(party_id, name="Party again")
+
+
+async def test_a_party_speaker_is_checked_before_it_is_saved(server, add_on):
+    music_assistant = await add_on.start()
+    await add_on.wait_until_listed(EXPOSED)
+    server.update_player(KITCHEN, can_group_with=["pair", "group"])
+    await add_on.wait_for(
+        lambda: _panel_row(music_assistant, KITCHEN)["can_group_with"] == ["group", "pair"],
+        "Kitchen's sync partners in the panel",
+    )
+    await music_assistant.set_speaker_name("pair", "Patio")
+    good = {"name": "Party", "main_player_id": KITCHEN, "member_ids": ["pair"]}
+    home_assistant = {"grouping": "home_assistant", "main_entity_id": "media_player.kitchen"}
+    for fields, problem in [
+        ({"name": " "}, "Give the party speaker a name"),
+        ({"name": "x" * 41}, "40 characters"),
+        ({"name": "Bad\x00name"}, "letters, numbers"),
+        ({"name": "downstairs (ma)"}, "already called"),
+        ({"name": "PATIO"}, "already called"),
+        ({"main_player_id": "gone"}, "not known"),
+        ({"member_ids": []}, "at least one speaker"),
+        ({"member_ids": [KITCHEN]}, "main speaker can't also"),
+        ({"member_ids": ["hidden"]}, "Hidden speaker can't sync with Kitchen"),
+        ({"grouping": "bluetooth"}, "who groups"),
+        ({"busy_speakers": "maybe"}, "already playing"),
+        ({"after_party": "dance"}, "when the music stops"),
+        ({"on_leave": "dance"}, "another device"),
+        ({**home_assistant, "main_entity_id": "light.porch"}, "main speaker in Home Assistant"),
+        ({**home_assistant, "member_ids": ["switch.fan"]}, "media players to join"),
+        ({"member_ids": [7]}, "Invalid field: member_ids"),
+        ({"colour": "red"}, "Invalid field: colour"),
+    ]:
+        with pytest.raises(ValueError, match=problem):
+            await music_assistant.add_party_speaker(**{**good, **fields})
+    party_id = await music_assistant.add_party_speaker(**good, main_entity_id="media_player.x")
+    assert add_on.saved().party_speakers[party_id].main_entity_id == ""  # Home Assistant only
+
+    with pytest.raises(ValueError, match="already called"):
+        await music_assistant.set_speaker_name("group", "party")
+    add_on.home_assistant.available = False  # the add-on runs outside Home Assistant
+    with pytest.raises(ValueError, match="runs in Home Assistant"):
+        await music_assistant.update_party_speaker(
+            party_id, **home_assistant, member_ids=["media_player.hedwig"]
+        )
+    assert [p.name for p in add_on.saved().party_speakers.values()] == ["Party"]
+
+
+async def test_the_party_form_lists_home_assistant_players_only_inside_home_assistant(add_on):
+    add_on.home_assistant.players = {
+        p.entity_id: p
+        for p in [
+            MediaPlayer("media_player.radio", "radio", "off", False, []),
+            MediaPlayer("media_player.hedwig", "Hedwig", "idle", True, []),
+        ]
+    }
+    music_assistant = await add_on.start()
+    assert music_assistant.status()["home_assistant_available"] is True
+    assert await music_assistant.home_assistant_players() == [
+        {"entity_id": "media_player.hedwig", "name": "Hedwig", "can_group": True},
+        {"entity_id": "media_player.radio", "name": "radio", "can_group": False},
+    ]
+
+    add_on.home_assistant.available = False
+    assert music_assistant.status()["home_assistant_available"] is False
+    with pytest.raises(HomeAssistantError, match="runs in Home Assistant"):
+        await music_assistant.home_assistant_players()
 
 
 def test_a_failed_save_keeps_the_previous_settings_file(tmp_path, monkeypatch):

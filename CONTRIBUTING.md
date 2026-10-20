@@ -24,7 +24,7 @@ these and an image build on every push and pull request.
 
 | Path | What |
 |---|---|
-| `qobuz_proxy/backends/music_assistant/` | The bridge: connection, backend, speakers, settings |
+| `qobuz_proxy/backends/music_assistant/` | The bridge: connection, backend, speakers, settings, party speakers, the Home Assistant client |
 | `qobuz_proxy/webui/music_assistant_routes.py`, `qobuz_proxy/webui/static/index.html`, `qobuz_proxy/webui/static/panel.js`, `qobuz_proxy/webui/static/panel.css` | The panel and its API. `qobuz_proxy/webui/static/app.js` and the `/api/speakers` routes are upstream's UI; our `index.html` does not load them. |
 | `config.json`, `Dockerfile.amd64`, `Dockerfile.aarch64`, `rootfs/start.py`, `translations/`, `repository.yaml`, `icon.png`, `logo.png`, `DOCS.md`, `CHANGELOG.md` | The Home Assistant add-on |
 | `tests/` | The tests (see below) |
@@ -39,16 +39,18 @@ upstream, so this repo tests only what it adds. Only the edges are fake:
 
 - `tests/fake_music_assistant.py`: an in-memory Music Assistant 2.10.7 server. The real
   `music-assistant-client` talks to it (only the websocket is fake). Playback time moves only
-  with `advance_time`, and `settle()` never sleeps.
+  with `advance_time`, and `settle()` never sleeps. It groups players with `set_members`.
 - `tests/fake_qobuz.py`: the Qobuz Connect cloud (it records what the app is shown), the track
   API and the messages the app sends.
-- `tests/rig.py`: one Music Assistant player wired like production, from the Qobuz websocket
-  down to the Music Assistant client.
+- `tests/rig.py`: one Music Assistant player or party speaker wired like production, from the
+  Qobuz websocket down to the Music Assistant client (rigs can share one connection, as the
+  speakers do in the add-on); and `FakeHomeAssistant`, Home Assistant's media players
+  in-process.
 - `tests/conftest.py`: gives every test its own data directory and shrinks the backend's timing
   constants. Fixtures: `server` (the fake, with Qobuz set up and one player, Kitchen), `rig`
   (Kitchen's speaker, already picked in the Qobuz app), `start_speaker` (starts and picks any
-  player's speaker, from saved sessions if given), `fake_login` (Music Assistant logins go to the
-  fake) and `fast_heartbeat` (a state report every 0.2 s).
+  player's speaker or a party speaker, from saved sessions if given), `fake_login` (Music
+  Assistant logins go to the fake) and `fast_heartbeat` (a state report every 0.2 s).
 
 The test files:
 
@@ -61,8 +63,13 @@ The test files:
   mid-play, a revoked token, an add-on restart while the music plays.
 - `tests/test_connection.py`: the one connection to Music Assistant: status, the player list,
   reconnects and backoff, logins and tokens, calls and their errors, event listeners.
-- `tests/test_speakers.py`: which players appear in the app, under which name, uuid and port,
-  and how that survives restarts, renames, outages and logins; the settings file.
+- `tests/test_speakers.py`: which players and party speakers appear in the app, under which
+  name, uuid and port, and how that survives restarts, renames, outages and logins; the party
+  speaker checks; the settings file.
+- `tests/test_party.py`: party speakers: the speakers join before the music starts and leave
+  when it stops or the app leaves the party speaker, the options, the hand-over to and from the
+  main player's own speaker, grouping in Music Assistant or Home Assistant, grouping that fails,
+  and the Home Assistant client.
 - `tests/test_panel.py`: the panel and its API: the page, the status checks, the Music Assistant
   login, the player choice, request validation and the guard against other sites.
 - `tests/test_upstream_changes.py`: the hooks in upstream files; each test fails if a merge lost
