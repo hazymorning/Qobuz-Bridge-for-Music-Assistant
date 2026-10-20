@@ -52,7 +52,8 @@ def load(path: Path) -> Settings:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         data["known_players"] = {
-            pid: KnownPlayer(**p) for pid, p in data.get("known_players", {}).items()
+            player_id: KnownPlayer(**known)
+            for player_id, known in data.get("known_players", {}).items()
         }
         return Settings(**{k: v for k, v in data.items() if k in _FIELDS})
     except FileNotFoundError:

@@ -24,6 +24,7 @@
         <h2 id="qobuz-title">1. Qobuz account</h2>
         <div id="qobuz-logged-out">
             <p>Log in with your Qobuz account so the add-on can play what you pick in the Qobuz app.</p>
+            <p id="qobuz-error" class="error-message" role="alert" hidden></p>
             <button type="button" id="qobuz-login">Log in to Qobuz</button>
             <p id="qobuz-login-note" class="note" hidden>
                 Do this on your phone while it is on your home Wi‑Fi. The login opens
@@ -67,15 +68,15 @@
             <input type="checkbox" id="expose-all">
             <span>All my Music Assistant players</span>
         </label>
-        <p class="note">New players are added automatically; players hidden in Music Assistant are
-            left out. Switch this off to pick players yourself.</p>
+        <p class="note">When on, new players are added automatically and players hidden in Music
+            Assistant are left out. Switch it off to pick players yourself.</p>
         <p id="players-error" class="error-message" role="alert" hidden></p>
         <ul id="players" class="players" aria-label="Music Assistant players"></ul>
         <p id="players-empty" class="note" hidden></p>
     </section>
 
     <footer class="footer">
-        <a href="https://github.com/hazymorning/ma-qobuz-bridge#readme"
+        <a href="https://github.com/hazymorning/ma-qobuz-bridge/blob/main/DOCS.md"
            target="_blank" rel="noopener noreferrer">Help</a>
     </footer>
 </main>

@@ -50,6 +50,7 @@ htmlcov/
 # Config files with secrets
 config.yaml
 .env
+data
 
 # Documentation and planning
 docs/

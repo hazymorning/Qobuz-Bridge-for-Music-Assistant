@@ -18,13 +18,16 @@ import socket
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from qobuz_proxy.backends.base import AudioBackend
 from qobuz_proxy.config import _SPEAKER_UUID_NAMESPACE, SpeakerConfig, slugify_name
 
 from . import LoginError, settings
 from .settings import DEFAULT_URL, KnownPlayer
+
+if TYPE_CHECKING:
+    from .connection import MusicAssistantConnection
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +85,7 @@ class MusicAssistantSpeakers:
 
         self._settings = settings.Settings()
         self._unsupported_reason = ""  # why MA support is off, if it is
-        self._connection: Optional[Any] = None
+        self._connection: Optional["MusicAssistantConnection"] = None
         self._is_qobuz_logged_in = False
         self._speakers: dict[str, Any] = {}
         self._running_configs: dict[str, SpeakerConfig] = {}
@@ -95,7 +98,7 @@ class MusicAssistantSpeakers:
         self._logged_speaker_names: list[str] = []
 
     @property
-    def connection(self) -> Optional[Any]:
+    def connection(self) -> Optional["MusicAssistantConnection"]:
         return self._connection
 
     async def start(self) -> None:
@@ -374,6 +377,7 @@ class MusicAssistantSpeakers:
     async def _start_speaker(self, player_id: str, config: SpeakerConfig) -> bool:
         from .backend import MusicAssistantBackend
 
+        assert self._connection is not None  # no speaker is wanted before start() made it
         backend = MusicAssistantBackend(
             self._connection,
             player_id,

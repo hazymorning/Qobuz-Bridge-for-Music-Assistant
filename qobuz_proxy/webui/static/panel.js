@@ -88,11 +88,11 @@
         return true;
     }
 
-    function renderChecks(st) {
-        if (!changed("checks", st.checks)) return;
+    function renderChecks(status) {
+        if (!changed("checks", status.checks)) return;
         var list = $("checks");
         list.textContent = "";
-        st.checks.forEach(function (check) {
+        status.checks.forEach(function (check) {
             var item = el("li", "check check-" + check.level);
             item.appendChild(el("span", "check-icon", ICONS[check.level]));
             var body = el("span", "check-body");
@@ -103,55 +103,57 @@
         });
     }
 
-    function renderQobuz(st) {
-        show($("qobuz-logged-out"), !st.qobuz.logged_in);
-        show($("qobuz-logged-in"), st.qobuz.logged_in);
-        $("qobuz-account").textContent = st.qobuz.account || "your Qobuz account";
+    function renderQobuz(status) {
+        if (status.qobuz.logged_in) show($("qobuz-error"), false);
+        show($("qobuz-logged-out"), !status.qobuz.logged_in);
+        show($("qobuz-logged-in"), status.qobuz.logged_in);
+        $("qobuz-account").textContent = status.qobuz.account || "your Qobuz account";
         show($("qobuz-login-note"), isFramed());
         $("qobuz-login-link").textContent = loginBase();
         $("qobuz-login-link").href = loginBase() + "/";
     }
 
-    function renderMusicAssistant(st) {
+    function renderMusicAssistant(status) {
         var form = $("music-assistant-form");
         if (form.contains(document.activeElement)) return; // don't move things while typing
-        var conn = st.connection;
-        var connected = conn.state === "connected";
+        var connection = status.connection;
+        var connected = connection.state === "connected";
         show($("music-assistant-connected"), connected);
         show(form, !connected);
         if (connected) {
             $("music-assistant-connected-text").textContent =
-                "Connected to Music Assistant " + conn.server_version + " at " + conn.url +
-                (conn.username ? " as " + conn.username : "") + ".";
+                "Connected to Music Assistant " + connection.server_version + " at " + connection.url +
+                (connection.username ? " as " + connection.username : "") + ".";
             return;
         }
         var message = "";
-        if (st.is_configured && conn.state === "connecting") {
-            message = "Connecting to Music Assistant at " + conn.url + "…";
-        } else if (st.is_configured && conn.state === "disconnected") {
-            message = conn.message + " The add-on keeps trying on its own; connect again only " +
+        if (status.is_configured && connection.state === "connecting") {
+            message = "Connecting to Music Assistant at " + connection.url + "…";
+        } else if (status.is_configured && connection.state === "disconnected") {
+            message = connection.message + " The add-on keeps trying on its own; connect again only " +
                 "if the address or login changed.";
-        } else if (conn.state === "auth_failed" || conn.message) {
-            message = conn.message;
+        } else if (connection.state === "auth_failed" || connection.message) {
+            message = connection.message;
         }
         $("music-assistant-message").textContent = message;
         show($("music-assistant-message"), !!message);
-        if (!$("music-assistant-url").value) $("music-assistant-url").value = conn.url;
-        if (!$("music-assistant-username").value) $("music-assistant-username").value = conn.username;
+        if (!$("music-assistant-url").value) $("music-assistant-url").value = connection.url;
+        if (!$("music-assistant-username").value) $("music-assistant-username").value = connection.username;
     }
 
-    function renderPlayers(st) {
-        $("expose-all").checked = st.expose_all;
-        if (!changed("players", [st.expose_all, st.is_configured, st.players])) return;
+    function renderPlayers(status) {
+        var connected = status.connection.state === "connected";
+        $("expose-all").checked = status.expose_all;
+        if (!changed("players", [status.expose_all, status.is_configured, connected, status.players])) return;
         var list = $("players");
         list.textContent = "";
-        st.players.forEach(function (p) {
+        status.players.forEach(function (p) {
             var shown = !!p.speaker_name;
             var box = el("input");
             box.type = "checkbox";
             box.dataset.id = p.player_id;
-            box.checked = st.expose_all ? shown : p.selected;
-            box.disabled = st.expose_all;
+            box.checked = status.expose_all ? shown : p.selected;
+            box.disabled = status.expose_all;
             var label = el("label", "player");
             label.appendChild(box);
             var text = el("span");
@@ -167,27 +169,28 @@
             list.appendChild(item);
         });
         var empty = "";
-        if (!st.is_configured) empty = "Connect to Music Assistant to see your players.";
-        else if (!st.players.length) empty = "Your players show up here once Music Assistant is connected.";
+        if (!status.is_configured) empty = "Connect to Music Assistant to see your players.";
+        else if (!status.players.length && connected) empty = "Music Assistant has no players yet.";
+        else if (!status.players.length) empty = "Your players show up here once Music Assistant is connected.";
         $("players-empty").textContent = empty;
         show($("players-empty"), !!empty);
     }
 
-    function render(st) {
-        last = st;
-        renderChecks(st);
-        renderQobuz(st);
-        renderMusicAssistant(st);
-        renderPlayers(st);
+    function render(status) {
+        last = status;
+        renderChecks(status);
+        renderQobuz(status);
+        renderMusicAssistant(status);
+        renderPlayers(status);
     }
 
     function poll() {
         clearTimeout(pollTimer);
         if (document.hidden) return; // resumes on visibilitychange
-        request("GET", "api/music-assistant/status").then(function (st) {
+        request("GET", "api/music-assistant/status").then(function (status) {
             failures = 0;
             show($("offline"), false);
-            if (!busy) render(st);
+            if (!busy) render(status);
         }, function () {
             failures += 1;
             show($("offline"), failures >= 2); // add-on restarting, or the phone left the Wi-Fi
@@ -201,16 +204,16 @@
     function send(method, url, body, errorBox) {
         busy = true;
         show(errorBox, false);
-        return request(method, url, body).then(function (st) {
+        return request(method, url, body).then(function (status) {
             busy = false;
-            render(st);
-        }, function (err) {
+            render(status);
+        }, function (error) {
             busy = false;
-            errorBox.textContent = err.message;
+            errorBox.textContent = error.message;
             show(errorBox, true);
             drawn = {};
             if (last) render(last); // put back what the server has
-            throw err;
+            throw error;
         });
     }
 
@@ -263,6 +266,14 @@
             return p.player_id;
         });
         send("PUT", "api/music-assistant/players", { selected: selected }, $("players-error")).catch(function () {});
+    }
+
+    // The Qobuz login comes back with ?error=... when it failed
+    if (new URLSearchParams(window.location.search).get("error")) {
+        $("qobuz-error").textContent = "The Qobuz login did not finish. Please try again.";
+        show($("qobuz-error"), true);
+        // Keep the path: under Home Assistant ingress it is /api/hassio_ingress/<token>/
+        history.replaceState(null, "", window.location.pathname + window.location.hash);
     }
 
     $("qobuz-login").addEventListener("click", onLogin);

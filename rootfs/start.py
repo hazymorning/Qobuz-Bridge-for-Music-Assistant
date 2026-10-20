@@ -61,8 +61,11 @@ def main() -> None:
     message = enable_panel_and_watchdog()
     if message:
         print(message, flush=True)
+    # Left over from 0.1.0, which kept the sessions in their own file; nothing reads it now
+    (DATA / "music_assistant_sessions.json").unlink(missing_ok=True)
     drop_privileges()
-    os.execv(sys.executable, [sys.executable, "-m", "qobuz_proxy"])
+    # -P: /data is the working directory and must never be on sys.path
+    os.execv(sys.executable, [sys.executable, "-P", "-m", "qobuz_proxy"])
 
 
 if __name__ == "__main__":

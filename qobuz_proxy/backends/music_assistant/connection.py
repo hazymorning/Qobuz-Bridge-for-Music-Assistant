@@ -29,6 +29,8 @@ from music_assistant_models.errors import (
     LoginFailed,
     MusicAssistantError,
 )
+from music_assistant_models.player import Player
+from music_assistant_models.player_queue import PlayerQueue
 
 from . import LoginError
 
@@ -51,7 +53,7 @@ CALL_TIMEOUT_SECONDS = 10.0
 # A connection that drops sooner than this does not reset the reconnect backoff
 STABLE_CONNECTION_SECONDS = 30.0
 
-ClientFactory = Callable[[str, aiohttp.ClientSession, str], Any]
+ClientFactory = Callable[[str, aiohttp.ClientSession, str], MusicAssistantClient]
 EventListener = Callable[[Any], None]
 StatusListener = Callable[["ConnectionStatus"], None]
 
@@ -110,7 +112,7 @@ class MusicAssistantConnection:
         self._token = token
         self._client_factory = client_factory
         self._http: Optional[aiohttp.ClientSession] = None
-        self._client: Optional[Any] = None
+        self._client: Optional[MusicAssistantClient] = None
         self._task: Optional[asyncio.Task[None]] = None
         self._status = ConnectionStatus(ConnectionState.NOT_CONFIGURED)
         self._event_listeners: dict[Optional[str], list[EventListener]] = {}
@@ -184,16 +186,16 @@ class MusicAssistantConnection:
             if p.type in PLAYER_TYPES and p.enabled
         ]
 
-    def player(self, player_id: str) -> Optional[Any]:
+    def player(self, player_id: str) -> Optional[Player]:
         return self._client.players.get(player_id) if self._client is not None else None
 
-    def queue(self, queue_id: str) -> Optional[Any]:
+    def queue(self, queue_id: str) -> Optional[PlayerQueue]:
         return self._client.player_queues.get(queue_id) if self._client is not None else None
 
     async def call(
         self,
         description: str,
-        command: Callable[[Any], Awaitable[T]],
+        command: Callable[[MusicAssistantClient], Awaitable[T]],
         timeout: float = CALL_TIMEOUT_SECONDS,
     ) -> T:
         """Run one MA command and log it.
@@ -226,7 +228,7 @@ class MusicAssistantConnection:
         except asyncio.CancelledError:
             # The client cancels pending commands when its socket closes
             task = asyncio.current_task()
-            if task is not None and task.cancelling() == 0:  # type: ignore[attr-defined]
+            if task is not None and task.cancelling() == 0:
                 logger.warning(
                     f"Music Assistant did not do {description}: connection to Music Assistant lost"
                 )
@@ -355,6 +357,7 @@ class MusicAssistantConnection:
             self._client = client
             connected_at = time.monotonic()
             self._timeouts_in_a_row = 0
+            assert client.server_info is not None  # set by connect()
             version = client.server_info.server_version
             has_qobuz_provider = any(p.domain == "qobuz" and p.available for p in client.providers)
             self._set_status(

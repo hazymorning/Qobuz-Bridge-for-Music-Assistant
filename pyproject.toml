@@ -58,6 +58,7 @@ dev = [
     "qobuz-proxy[music-assistant]",  # the tests drive the Music Assistant backend
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
+    "pytest-xdist>=3",
     "mypy>=1.7.0",
     "ruff>=0.1.0",
     "types-PyYAML>=6.0",
@@ -89,16 +90,15 @@ quote-style = "double"
 "qobuz_proxy/__init__.py" = ["E402"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.13"
 warn_return_any = true
 warn_unused_ignores = true
 exclude = ["qobuz_proxy/proto/"]
 
-# The Music Assistant packages need Python 3.13 and use syntax mypy rejects
-# when targeting 3.10, so their types are not followed (they become Any).
+# The Music Assistant packages are checked against their own types (they need the
+# python_version above), even if a release ships without its py.typed marker.
 [[tool.mypy.overrides]]
 module = ["music_assistant_client", "music_assistant_client.*", "music_assistant_models", "music_assistant_models.*"]
-follow_imports = "skip"
 follow_untyped_imports = true
 
 # The generated protobuf code (excluded above) and the optional local-audio libraries, which

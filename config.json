@@ -2,7 +2,7 @@
   "name": "MA Qobuz Bridge",
   "version": "0.2.0",
   "slug": "qobuz_bridge",
-  "description": "Pick your Music Assistant speakers and groups as Qobuz Connect devices in the Qobuz app",
+  "description": "Your Music Assistant players and groups as speakers in the Qobuz app",
   "url": "https://github.com/hazymorning/ma-qobuz-bridge",
   "arch": ["aarch64", "amd64"],
   "startup": "application",

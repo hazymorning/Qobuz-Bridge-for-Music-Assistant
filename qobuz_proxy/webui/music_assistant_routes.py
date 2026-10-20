@@ -34,6 +34,9 @@ async def guard_requests(request: web.Request, handler: Handler) -> web.StreamRe
     response.headers.setdefault(
         "Content-Security-Policy", "default-src 'self'; frame-ancestors 'self'"
     )
+    # Browsers check for a newer panel.js and panel.css on every load (a cheap 304 if
+    # unchanged): their ?v= is the upstream version, which add-on updates leave as it is
+    response.headers.setdefault("Cache-Control", "no-cache")
     return response
 
 
