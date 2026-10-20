@@ -119,6 +119,9 @@ class MusicAssistantConnection:
         self._status_listeners: list[StatusListener] = []
         self._timeouts_in_a_row = 0
         self._background: set[asyncio.Task[Any]] = set()
+        # Queue id -> (item id, backend): the last item a backend continued on that queue.
+        # A party speaker plays on its main player's queue, so two backends can share one.
+        self._continued_items: dict[str, tuple[str, object]] = {}
 
     @property
     def status(self) -> ConnectionStatus:
@@ -191,6 +194,15 @@ class MusicAssistantConnection:
 
     def queue(self, queue_id: str) -> Optional[PlayerQueue]:
         return self._client.player_queues.get(queue_id) if self._client is not None else None
+
+    def continue_item(self, queue_id: str, item_id: str, backend: object) -> None:
+        """``backend`` plays this queue item now, even if another backend started it."""
+        self._continued_items[queue_id] = (item_id, backend)
+
+    def is_continued_by_another(self, queue_id: str, item_id: str, backend: object) -> bool:
+        """Whether another backend continued this queue item after ``backend`` played it."""
+        continued = self._continued_items.get(queue_id)
+        return continued is not None and continued[0] == item_id and continued[1] is not backend
 
     async def call(
         self,

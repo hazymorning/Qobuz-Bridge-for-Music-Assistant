@@ -112,7 +112,11 @@ class Party:
         party = self.party_speaker
         main_id = party.main_player_id
         main = self._connection.player(main_id)
-        with_main = set(main.group_members) if main is not None else set()
+        if main is None or not main.available:
+            # Music Assistant's own message would name the player by its id
+            name = self._player_name(main_id) if main is not None else "The main speaker"
+            return [f"The speakers could not join: {name} is not available in Music Assistant."]
+        with_main = set(main.group_members)
         problems, to_add = [], []
         for member_id in party.member_ids:
             member = self._connection.player(member_id)
@@ -121,7 +125,7 @@ class Party:
                 continue  # with the main already
             if member is None or not member.available:
                 problems.append(f"{name} could not join: it is not available in Music Assistant.")
-            elif main is not None and main.can_group_with and member_id not in main.can_group_with:
+            elif main.can_group_with and member_id not in main.can_group_with:
                 problems.append(
                     f"{name} could not join: it can't sync with {self._player_name(main_id)}."
                 )

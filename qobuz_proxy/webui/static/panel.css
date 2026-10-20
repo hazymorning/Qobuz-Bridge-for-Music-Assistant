@@ -12,6 +12,13 @@ h1 {
     margin-bottom: 2px;
 }
 
+h3 {
+    margin-top: 12px;
+    font-size: 15px;
+    font-weight: 600;
+    color: #ffffff;
+}
+
 .subtitle,
 .note {
     color: #a8a8a8;
@@ -50,7 +57,8 @@ button:disabled {
 }
 
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible {
     outline: 2px solid #90caf9;
     outline-offset: 2px;
 }
@@ -74,7 +82,8 @@ label {
 }
 
 input[type="text"],
-input[type="password"] {
+input[type="password"],
+select {
     width: 100%;
     min-height: 44px;
     padding: 10px 12px;
@@ -85,11 +94,25 @@ input[type="password"] {
     font-size: 16px; /* 16px stops iOS from zooming in */
 }
 
-input[type="checkbox"] {
+input[type="checkbox"],
+input[type="radio"] {
     width: 22px;
     height: 22px;
     flex-shrink: 0;
     accent-color: #1976d2;
+}
+
+fieldset {
+    min-width: 0;
+    margin: 16px 0 0;
+    padding: 0;
+    border: none;
+}
+
+legend {
+    padding: 0;
+    font-size: 14px;
+    color: #cccccc;
 }
 
 .checks {
@@ -138,7 +161,8 @@ input[type="checkbox"] {
 }
 
 .switch,
-.player {
+.player,
+.choice {
     display: flex;
     align-items: center;
     gap: 12px;
@@ -149,22 +173,54 @@ input[type="checkbox"] {
     cursor: pointer;
 }
 
-.players {
+.choice {
+    padding: 8px 0;
+}
+
+.choice input:disabled + span {
+    color: #777777;
+}
+
+.players,
+.parties,
+.choices {
     list-style: none;
+}
+
+.players,
+.parties {
     margin-top: 8px;
 }
 
-.players li {
+.players li,
+.parties li {
     border-top: 1px solid #2a2a2a;
+}
+
+.parties li {
+    padding-top: 10px;
 }
 
 .player-name {
     margin-right: 8px;
 }
 
-.player .note {
+.player .note,
+.choice .note,
+.parties .note,
+.warning {
     display: block;
     margin: 0;
+}
+
+.warning {
+    color: #ffb74d;
+    font-size: 13px;
+}
+
+.party-buttons {
+    display: flex;
+    gap: 24px;
 }
 
 .rename {
@@ -177,9 +233,13 @@ input[type="checkbox"] {
     padding: 0 0 12px 34px;
 }
 
-.rename-buttons {
+.form-buttons {
     display: flex;
     gap: 8px;
+}
+
+.party-form .form-buttons {
+    margin-top: 12px;
 }
 
 .badge {

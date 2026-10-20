@@ -1,5 +1,5 @@
 """The add-on panel and its HTTP API: the page, the status checks, the Music Assistant login and
-player choice, request validation, and the guard against other sites.
+player choice, the party speakers, request validation, and the guard against other sites.
 """
 
 import asyncio
@@ -15,17 +15,20 @@ from aiohttp import ClientResponse, web
 from aiohttp.test_utils import TestClient, TestServer
 
 from qobuz_proxy.backends.music_assistant import settings
+from qobuz_proxy.backends.music_assistant.home_assistant import NOT_AVAILABLE, MediaPlayer
 from qobuz_proxy.backends.music_assistant.speakers import MusicAssistantSpeakers
 from qobuz_proxy.webui import music_assistant_routes
 from qobuz_proxy.webui.routes import register_routes
 from tests.fake_music_assistant import ADMIN_PASSWORD, FakeMusicAssistantServer
-from tests.rig import KITCHEN, wait_for
+from tests.rig import KITCHEN, FakeHomeAssistant, wait_for
 
 STATUS = "/api/music-assistant/status"
 CONNECT = "/api/music-assistant/connect"
 DISCONNECT = "/api/music-assistant/disconnect"
 PLAYERS = "/api/music-assistant/players"
 SPEAKER_NAME = "/api/music-assistant/speaker-name"
+PARTY_SPEAKERS = "/api/music-assistant/party-speakers"
+HOME_ASSISTANT_PLAYERS = "/api/music-assistant/home-assistant-players"
 
 
 class SilentSpeaker:
@@ -45,18 +48,23 @@ class SilentSpeaker:
 
 
 class Panel:
-    """The add-on's web server on a fresh install, with its real Music Assistant side."""
+    """The add-on's web server on a fresh install, with its real Music Assistant side.
+
+    It runs outside Home Assistant until a test makes ``home_assistant`` available.
+    """
 
     def __init__(self, server: FakeMusicAssistantServer, settings_path: Path) -> None:
         self.server = server
         self.settings_path = settings_path
         self.auth_state: dict[str, Any] = {"authenticated": False, "email": "", "name": ""}
         self.logouts = 0
+        self.home_assistant = FakeHomeAssistant(available=False)
         self.music_assistant = MusicAssistantSpeakers(
             settings_path,
             SilentSpeaker,
             client_factory=server.client_factory,
             port_is_free=lambda address, port: True,
+            home_assistant=self.home_assistant,
         )
         app = web.Application()
         app["auth_state"] = self.auth_state
@@ -170,8 +178,16 @@ async def test_the_script_calls_routes_that_exist_as_json_and_by_relative_urls(p
     # The guard takes changes only as JSON
     assert re.search(r'headers\["Content-Type"\] = "application/json"', script)
 
+    party_speaker = "api/music-assistant/party-speakers/"  # + its id
+    assert {
+        ("POST", PARTY_SPEAKERS[1:]),
+        ("PUT", party_speaker),
+        ("DELETE", party_speaker),
+        ("GET", HOME_ASSISTANT_PLAYERS[1:]),
+    } <= set(calls)
     for method, url in calls:
-        response = await panel.client.request(method, f"/{url}", json={})
+        path = f"/{url}0123abcd" if url.endswith("/") else f"/{url}"
+        response = await panel.client.request(method, path, json={})
         assert response.status not in (404, 405), (method, url)
 
 
@@ -338,10 +354,78 @@ async def test_a_speaker_is_renamed_in_the_panel_and_an_empty_name_brings_the_de
     assert (kitchen["speaker_name"], kitchen["custom_name"]) == ("Kitchen (MA)", "")
 
 
+async def test_a_party_speaker_is_added_changed_and_deleted_in_the_panel(panel):
+    await panel.set_up()
+
+    form = {"name": "Garden party", "main_player_id": KITCHEN, "member_ids": ["up2"]}
+    status = await _ok(await panel.client.post(PARTY_SPEAKERS, json=form))
+    [party] = status["party_speakers"]
+    assert party == {
+        "party_id": party["party_id"],
+        **form,
+        "grouping": "music_assistant",
+        "main_entity_id": "",
+        "busy_speakers": "join",
+        "after_party": "split",
+        "on_leave": "split",
+        "speaker_name": "Garden party",
+        "problem": "",
+    }
+    assert _detail(status, "speakers") == "3 speakers and groups are available in the Qobuz app."
+
+    url = f"{PARTY_SPEAKERS}/{party['party_id']}"
+    status = await _ok(
+        await panel.client.put(url, json={"after_party": "keep", "on_leave": "keep"})
+    )
+    assert status["party_speakers"] == [{**party, "after_party": "keep", "on_leave": "keep"}]
+
+    taken = await panel.client.put(url, json={"name": "kitchen (ma)"})
+    assert (taken.status, await taken.json()) == (
+        400,
+        {"error": "Another speaker is already called “kitchen (ma)”."},
+    )
+
+    status = await _ok(await panel.client.delete(url))
+    assert (status["party_speakers"], status["speaker_count"]) == ([], 2)
+    assert panel.saved().party_speakers == {}
+
+
+async def test_home_assistant_grouping_is_offered_only_inside_home_assistant(panel):
+    await panel.set_up()
+    form = {
+        "name": "Garden party",
+        "main_player_id": KITCHEN,
+        "grouping": "home_assistant",
+        "main_entity_id": "media_player.kitchen",
+        "member_ids": ["media_player.hedwig"],
+    }
+
+    status = await panel.status()
+    assert status["home_assistant_available"] is False
+    for response in (
+        await panel.client.get(HOME_ASSISTANT_PLAYERS),
+        await panel.client.post(PARTY_SPEAKERS, json=form),
+    ):
+        assert (response.status, await response.json()) == (400, {"error": NOT_AVAILABLE})
+
+    panel.home_assistant.available = True  # the add-on runs in Home Assistant
+    panel.home_assistant.players = {
+        "media_player.hedwig": MediaPlayer("media_player.hedwig", "Hedwig", "idle", True, [])
+    }
+    assert (await panel.status())["home_assistant_available"] is True
+    assert await _ok(await panel.client.get(HOME_ASSISTANT_PLAYERS)) == {
+        "players": [{"entity_id": "media_player.hedwig", "name": "Hedwig", "can_group": True}]
+    }
+    status = await _ok(await panel.client.post(PARTY_SPEAKERS, json=form))
+    [party] = status["party_speakers"]
+    assert {key: party[key] for key in form} == form
+
+
 async def test_malformed_requests_are_refused_and_change_nothing(panel, server):
     await panel.set_up()
     before = panel.settings_path.read_text()
     good = _login_form(server)
+    party = {"name": "Party", "main_player_id": KITCHEN, "member_ids": ["up2"]}
     cases: list[tuple[str, str, Any, str]] = [
         ("POST", CONNECT, "{not json", "Invalid request."),
         ("PUT", PLAYERS, "[1, 2]", "Invalid request."),
@@ -360,6 +444,24 @@ async def test_malformed_requests_are_refused_and_change_nothing(panel, server):
         # Both would succeed without the length limit
         ("POST", CONNECT, {**good, "url": good["url"] + "/" * 1000}, "Invalid field: url"),
         ("PUT", PLAYERS, {"selected": ["up2"] * 1001}, "Invalid field: selected"),
+        ("POST", PARTY_SPEAKERS, "[]", "Invalid request."),
+        ("POST", PARTY_SPEAKERS, {**party, "colour": "red"}, "Invalid field: colour"),
+        ("POST", PARTY_SPEAKERS, {**party, "member_ids": "up2"}, "Invalid field: member_ids"),
+        ("POST", PARTY_SPEAKERS, {**party, "member_ids": [2]}, "Invalid field: member_ids"),
+        ("POST", PARTY_SPEAKERS, {**party, "name": "x" * 1001}, "Invalid field: name"),
+        (
+            "POST",
+            PARTY_SPEAKERS,
+            {**party, "member_ids": []},
+            "Pick at least one speaker to join the party.",
+        ),
+        (
+            "PUT",
+            f"{PARTY_SPEAKERS}/gone",
+            {"name": "X"},
+            "That party speaker is not there any more.",
+        ),
+        ("DELETE", f"{PARTY_SPEAKERS}/gone", {}, "That party speaker is not there any more."),
     ]
     for method, path, body, error in cases:
         data = body if isinstance(body, str) else json.dumps(body)

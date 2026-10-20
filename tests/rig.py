@@ -139,7 +139,9 @@ class FakeHomeAssistant:
 class Rig:
     """One exposed Music Assistant player as a Qobuz Connect device, wired like production.
 
-    With ``party`` it is that party speaker instead, playing on its main player.
+    With ``party`` it is that party speaker instead, playing on its main player. With
+    ``connection`` it shares another rig's Music Assistant connection, as all speakers do in the
+    add-on.
     """
 
     def __init__(
@@ -152,6 +154,7 @@ class Rig:
         sessions: Optional[dict[str, dict[str, Any]]] = None,
         party: Optional[PartySpeaker] = None,
         home_assistant: Optional[FakeHomeAssistant] = None,
+        connection: Optional[MusicAssistantConnection] = None,
     ) -> None:
         self.server = server
         self.player_id = party.main_player_id if party is not None else player_id
@@ -164,17 +167,20 @@ class Rig:
         self.metadata = StubMetadata()
         self.tokens = make_tokens()
         self.tasks: list[asyncio.Future[Any]] = []
-        self.connection: Optional[MusicAssistantConnection] = None
+        self.connection = connection
+        self._owns_connection = connection is None
         self.speaker: Optional[Speaker] = None
         monkeypatch.setattr(websockets, "connect", self.cloud.connect)
         monkeypatch.setattr(speaker_module, "DiscoveryService", StubDiscovery)
         monkeypatch.setattr(speaker_module, "MetadataService", lambda **kwargs: self.metadata)
 
     async def start(self, *, wait_for_music_assistant: bool = True) -> Rig:
-        connection = self.connection = MusicAssistantConnection(
-            self.server.url, self.server.token, client_factory=self.server.client_factory
-        )
-        await connection.start()
+        connection = self.connection
+        if connection is None:
+            connection = self.connection = MusicAssistantConnection(
+                self.server.url, self.server.token, client_factory=self.server.client_factory
+            )
+            await connection.start()
         if wait_for_music_assistant:
             await self.wait_for(lambda: connection.is_connected, "Music Assistant connected")
         session = self.sessions.get(self.player_id)
@@ -213,7 +219,7 @@ class Rig:
     async def close(self) -> None:
         if self.speaker is not None:
             await self.speaker.stop()
-        if self.connection is not None:
+        if self.connection is not None and self._owns_connection:
             await self.connection.stop()
         for task in self.tasks:
             task.cancel()

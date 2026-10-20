@@ -9,6 +9,7 @@ import pytest
 from qobuz_proxy.backends.music_assistant import backend as backend_module
 from qobuz_proxy.backends.music_assistant import connection as connection_module
 from qobuz_proxy.backends.music_assistant import party as party_module
+from qobuz_proxy.backends.music_assistant.connection import MusicAssistantConnection
 from qobuz_proxy.backends.music_assistant.settings import PartySpeaker
 from qobuz_proxy.connect import ws_manager
 from qobuz_proxy.playback import state_reporter as state_reporter_module
@@ -90,6 +91,7 @@ async def start_speaker(
         wait_for_music_assistant: bool = True,
         party: Optional[PartySpeaker] = None,
         home_assistant: Optional[FakeHomeAssistant] = None,
+        connection: Optional[MusicAssistantConnection] = None,
     ) -> Rig:
         rig = Rig(
             server,
@@ -99,6 +101,7 @@ async def start_speaker(
             sessions=sessions,
             party=party,
             home_assistant=home_assistant,
+            connection=connection,
         )
         started.append(rig)
         await rig.start(wait_for_music_assistant=wait_for_music_assistant)

@@ -87,6 +87,85 @@
         <p id="players-empty" class="note" hidden></p>
     </section>
 
+    <section class="card" aria-labelledby="party-title">
+        <h2 id="party-title">4. Party speakers</h2>
+        <p class="note">A party speaker is one more speaker in the Qobuz app. Its music plays on a main
+            speaker, and the speakers you pick join that speaker while the party plays.</p>
+        <p id="party-error" class="error-message" role="alert" hidden></p>
+        <ul id="party-speakers" class="parties" aria-label="Party speakers"></ul>
+        <p id="party-empty" class="note" hidden></p>
+        <button type="button" id="party-add" hidden>Add a party speaker</button>
+        <form id="party-form" class="party-form" novalidate hidden>
+            <h3 id="party-form-title"></h3>
+            <label for="party-name">Name in the Qobuz app</label>
+            <input id="party-name" type="text" maxlength="40" autocomplete="off">
+            <label for="party-main">Main speaker (plays the music)</label>
+            <select id="party-main"></select>
+            <fieldset>
+                <legend>Group with</legend>
+                <label class="choice">
+                    <input type="radio" name="party-grouping" value="music_assistant" checked>
+                    <span>Music Assistant</span>
+                </label>
+                <label class="choice">
+                    <input type="radio" name="party-grouping" value="home_assistant" id="party-grouping-home-assistant">
+                    <span>Home Assistant</span>
+                </label>
+                <p id="party-home-assistant-note" class="note" hidden>Home Assistant can only group
+                    speakers when the add-on runs in Home Assistant.</p>
+            </fieldset>
+            <div id="party-main-entity-field" hidden>
+                <label for="party-main-entity">Main speaker in Home Assistant</label>
+                <select id="party-main-entity"></select>
+            </div>
+            <fieldset>
+                <legend>Speakers that join</legend>
+                <ul id="party-members" class="choices"></ul>
+                <p id="party-members-note" class="note" hidden></p>
+            </fieldset>
+            <fieldset>
+                <legend>Speakers already playing something else</legend>
+                <label class="choice">
+                    <input type="radio" name="party-busy" value="join" checked>
+                    <span>Bring them into the party</span>
+                </label>
+                <label class="choice">
+                    <input type="radio" name="party-busy" value="skip">
+                    <span>Leave them playing</span>
+                </label>
+            </fieldset>
+            <fieldset>
+                <legend>When the music stops</legend>
+                <label class="choice">
+                    <input type="radio" name="party-after" value="split" checked>
+                    <span>Split the group again</span>
+                </label>
+                <label class="choice">
+                    <input type="radio" name="party-after" value="keep">
+                    <span>Keep the speakers together</span>
+                </label>
+            </fieldset>
+            <fieldset>
+                <legend>When you switch to another device in the Qobuz app</legend>
+                <label class="choice">
+                    <input type="radio" name="party-leave" value="split" checked>
+                    <span>Stop and split the group</span>
+                </label>
+                <label class="choice">
+                    <input type="radio" name="party-leave" value="keep">
+                    <span>Stop and keep the speakers together</span>
+                </label>
+            </fieldset>
+            <p id="party-form-error" class="error-message" role="alert" hidden></p>
+            <div class="form-buttons">
+                <button type="submit" id="party-save">Save</button>
+                <button type="button" id="party-cancel" class="button-secondary">Cancel</button>
+            </div>
+            <p id="party-edit-note" class="note" hidden>If it is playing now, the changes apply once
+                the music stops.</p>
+        </form>
+    </section>
+
     <footer class="footer">
         <a href="https://github.com/hazymorning/ma-qobuz-bridge/blob/main/DOCS.md"
            target="_blank" rel="noopener noreferrer">Help</a>

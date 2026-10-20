@@ -172,6 +172,32 @@ async def test_a_speaker_playing_something_else_is_left_playing_or_brought_into_
     assert grouped(server) == joined
 
 
+async def test_the_main_speaker_and_its_party_speaker_hand_the_music_over_without_stopping_it(
+    server, start_speaker
+):
+    kitchen = await start_speaker()
+    await kitchen.play_album(0)
+    server.advance_time(KITCHEN, 40)
+    rig = await start_speaker(
+        party=party(on_leave="keep"), name="Party", connection=kitchen.connection
+    )
+
+    # The app moves to the party speaker; the music gets there before Kitchen hears it was left
+    await rig.deliver(album_state(0, APP_PLAYING, pos=41_000))
+    await kitchen.deliver(set_active(False))
+    await rig.idle(0.5)
+    assert (rig.app(), rig.queue_state()) == ((APP_PLAYING, 1), MusicAssistantState.PLAYING)
+    assert grouped(server) == [HEDWIG, BATH]
+
+    # And back to Kitchen, the speakers kept together
+    await kitchen.deliver(set_active(True), album_state(0, APP_PLAYING, pos=42_000))
+    await rig.deliver(set_active(False))
+    await kitchen.idle(0.5)
+    assert (kitchen.app(), kitchen.queue_state()) == ((APP_PLAYING, 1), MusicAssistantState.PLAYING)
+    assert grouped(server) == [HEDWIG, BATH]
+    assert "player_queues/stop" not in kitchen.writes()
+
+
 async def test_home_assistant_groups_the_party_with_join_and_unjoin(start_speaker):
     kitchen, hedwig, bath, porch = (
         f"media_player.{n}" for n in ["kitchen", "hedwig", "bath", "porch"]
@@ -224,6 +250,18 @@ async def test_a_party_that_cannot_group_still_plays_on_the_main_speaker_and_say
 
     assert grouped(server) == [HEDWIG, BATH, LOFT]
     assert rig.party.problem == ""
+
+
+async def test_a_party_whose_main_speaker_is_off_says_so_by_its_name(server, start_speaker):
+    rig = await start_speaker(party=party(), name="Party")
+    server.update_player(KITCHEN, available=False)
+    await server.settle()
+    await rig.deliver(album_state(0))
+
+    assert rig.party.problem == (
+        "The speakers could not join: Kitchen is not available in Music Assistant."
+    )
+    assert grouping_calls(server) == []
 
 
 async def test_the_home_assistant_client_sends_the_token_and_turns_failures_into_plain_messages(
