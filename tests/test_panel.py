@@ -277,6 +277,22 @@ async def test_a_wrong_password_is_refused_with_a_plain_message(panel, server):
     assert panel.saved().token == ""
 
 
+async def test_a_token_made_in_music_assistant_connects_without_a_password(panel, server):
+    response = await panel.client.post(CONNECT, json={"url": server.url, "token": "not-a-token"})
+    assert response.status == 400
+    assert "did not accept that token" in (await response.json())["error"]
+    assert panel.saved().token == ""
+
+    pasted = {"url": server.url, "token": f" {server.token} "}  # with the spaces a paste brings
+    status = await _ok(await panel.client.post(CONNECT, json=pasted))
+
+    assert status["connection"]["state"] == "connected"
+    assert status["connection"]["username"] == "admin"
+    assert panel.saved().token == server.token  # used as it is: no token of our own is made
+    assert server.calls("auth/token/create") == []
+    assert server.token not in json.dumps(status)
+
+
 async def test_a_partial_player_choice_is_applied_saved_and_keeps_the_other_setting(panel):
     await panel.set_up()
 
@@ -305,7 +321,8 @@ async def test_malformed_requests_are_refused_and_change_nothing(panel, server):
     cases: list[tuple[str, str, Any, str]] = [
         ("POST", CONNECT, "{not json", "Invalid request."),
         ("PUT", PLAYERS, "[1, 2]", "Invalid request."),
-        ("POST", CONNECT, {**good, "token": "pasted-token"}, "Invalid field: token"),
+        ("POST", CONNECT, {**good, "remember": True}, "Invalid field: remember"),
+        ("POST", CONNECT, {"url": good["url"], "token": 123}, "Invalid field: token"),
         ("POST", CONNECT, {**good, "password": 123}, "Invalid field: password"),
         ("PUT", PLAYERS, {"expose_all": "no"}, "Invalid field: expose_all"),
         ("PUT", PLAYERS, {"selected": [1, 2]}, "Invalid field: selected"),

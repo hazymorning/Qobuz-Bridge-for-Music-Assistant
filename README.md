@@ -20,9 +20,9 @@ a Qobuz subscription.
 4. Tap **Log in to Qobuz**, sign in on the page that opens, then come back to the panel. Do this
    while your phone is on your home Wi-Fi.
 5. Under **Music Assistant**, enter your Music Assistant username and password and tap
-   **Connect**. The address is filled in for the Music Assistant add-on; change it if yours runs
-   elsewhere. No Music Assistant password yet (you only open it from the sidebar)? Set one in
-   your Music Assistant user profile first.
+   **Connect**. No Music Assistant password (you only open it from the sidebar)? Tap **Use a
+   token instead**, create a long-lived token in your Music Assistant user profile and paste it.
+   The address is filled in for the Music Assistant add-on; change it if yours runs elsewhere.
 6. Under **Speakers in the Qobuz app**, leave **All my Music Assistant players** on, or switch it
    off and tick the players you want.
 

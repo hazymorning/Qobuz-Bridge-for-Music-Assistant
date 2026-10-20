@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- The Music Assistant login takes a long-lived token again (**Use a token instead**), for anyone
+  who only opens Music Assistant from the Home Assistant sidebar and has no password.
+
 ## 0.2.0
 
 - New, shorter name: MA Qobuz Bridge. The repository moved to

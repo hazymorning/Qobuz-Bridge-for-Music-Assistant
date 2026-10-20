@@ -25,7 +25,7 @@ is asked.
 
 | File | Role |
 |---|---|
-| `qobuz_proxy/backends/music_assistant/connection.py` | One websocket to MA for all players. Builds a new `MusicAssistantClient` per attempt (the client is single-use), reconnects with capped backoff, stops when MA rejects the token, maps errors, times out every call, hands events to listeners by player id. Also the username/password → long-lived token login. |
+| `qobuz_proxy/backends/music_assistant/connection.py` | One websocket to MA for all players. Builds a new `MusicAssistantClient` per attempt (the client is single-use), reconnects with capped backoff, stops when MA rejects the token, maps errors, times out every call, hands events to listeners by player id. Also the logins: username/password → a long-lived token of our own, or a check of a token made in MA. |
 | `qobuz_proxy/backends/music_assistant/backend.py` | `MusicAssistantBackend`: one MA player or group. |
 | `qobuz_proxy/backends/music_assistant/speakers.py` | `MusicAssistantSpeakers`: owns the connection, decides which players to expose, starts and stops their speakers, stable UUIDs (`uuid5(namespace, "music_assistant:<player_id>")`) and ports (8700+, remembered). |
 | `qobuz_proxy/backends/music_assistant/settings.py` | `music_assistant.json` in the data dir (mode 0600): address, token, username, exposure choices, known players and their ports, and the MA queue items each backend created. |

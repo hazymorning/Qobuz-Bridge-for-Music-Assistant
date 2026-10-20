@@ -450,3 +450,41 @@ async def login_and_create_token(url: str, username: str, password: str) -> tupl
     name = user.display_name or user.username or username
     logger.info(f"Created a long-lived Music Assistant token for user {name}")
     return str(token), name
+
+
+async def check_token(url: str, token: str) -> str:
+    """Check a long-lived token made in Music Assistant by connecting once with it.
+
+    Returns:
+        the token's user name
+
+    Raises:
+        LoginError: with a plain-language message.
+    """
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as http:
+        client = MusicAssistantClient(url, http, token=token)
+        try:
+            await asyncio.wait_for(client.connect(), CONNECT_TIMEOUT_SECONDS)
+            user = await asyncio.wait_for(client.auth.get_current_user(), CALL_TIMEOUT_SECONDS)
+        except (AuthenticationFailed, AuthenticationRequired) as e:
+            if _token_rejected(e):
+                raise LoginError(
+                    "Music Assistant did not accept that token. Create a new long-lived token in "
+                    "your Music Assistant user profile and paste all of it."
+                ) from None
+            raise LoginError(f"Music Assistant refused the connection ({e}).") from None
+        except InvalidServerVersion as e:
+            raise LoginError(f"This Music Assistant version is not supported ({e}).") from None
+        except (asyncio.TimeoutError, OSError, MusicAssistantClientException):
+            raise LoginError(
+                f"Can't reach Music Assistant at {url}. Check the address and that the Music "
+                "Assistant add-on is running."
+            ) from None
+        except MusicAssistantError as e:
+            raise LoginError(f"Music Assistant could not check that token ({e}).") from None
+        finally:
+            with contextlib.suppress(Exception):
+                await client.disconnect()
+    name = user.display_name or user.username
+    logger.info(f"Using a long-lived Music Assistant token of user {name}")
+    return name

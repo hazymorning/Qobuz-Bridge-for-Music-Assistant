@@ -217,18 +217,34 @@
         });
     }
 
+    function usesToken() {
+        return !$("music-assistant-token-login").hidden;
+    }
+
+    function onLoginSwitch() {
+        var token = !usesToken();
+        show($("music-assistant-token-login"), token);
+        show($("music-assistant-password-login"), !token);
+        $("music-assistant-login-switch").textContent =
+            token ? "Use a username and password instead" : "Use a token instead";
+        $(token ? "music-assistant-token" : "music-assistant-username").focus();
+    }
+
     function onConnect(event) {
         event.preventDefault();
-        var body = {
-            url: $("music-assistant-url").value.trim(),
-            username: $("music-assistant-username").value.trim(),
-            password: $("music-assistant-password").value
-        };
+        var body = { url: $("music-assistant-url").value.trim() };
+        if (usesToken()) {
+            body.token = $("music-assistant-token").value.trim();
+        } else {
+            body.username = $("music-assistant-username").value.trim();
+            body.password = $("music-assistant-password").value;
+        }
         $("music-assistant-connect").disabled = true;
         $("music-assistant-connect").textContent = "Connecting…";
         document.activeElement.blur();
         send("POST", "api/music-assistant/connect", body, $("music-assistant-error")).then(function () {
             $("music-assistant-password").value = "";
+            $("music-assistant-token").value = "";
         }, function () {}).then(function () {
             $("music-assistant-connect").disabled = false;
             $("music-assistant-connect").textContent = "Connect";
@@ -279,6 +295,7 @@
     $("qobuz-login").addEventListener("click", onLogin);
     $("qobuz-logout").addEventListener("click", onLogout);
     $("music-assistant-form").addEventListener("submit", onConnect);
+    $("music-assistant-login-switch").addEventListener("click", onLoginSwitch);
     $("music-assistant-disconnect").addEventListener("click", onDisconnect);
     $("expose-all").addEventListener("change", onExposeAll);
     $("players").addEventListener("change", onPlayerTicked);

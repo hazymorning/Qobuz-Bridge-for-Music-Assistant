@@ -82,7 +82,7 @@ def build_checks(qobuz: dict[str, Any], status: dict[str, Any]) -> list[dict[str
             "error",
             connection["message"]
             or "Not connected to Music Assistant yet. Enter your Music Assistant username and "
-            "password below.",
+            "password below, or a token.",
         )
     checks.append(("music_assistant", music_assistant[0], "Music Assistant", music_assistant[1]))
 
@@ -174,11 +174,9 @@ async def _handle_status(request: web.Request) -> web.Response:
 
 
 async def _handle_connect(request: web.Request) -> web.Response:
-    body = await _read_body(request, {"url": str, "username": str, "password": str})
+    body = await _read_body(request, {"url": str, "username": str, "password": str, "token": str})
     try:
-        await request.app["music_assistant"].connect(
-            body.get("url", ""), body.get("username", ""), body.get("password", "")
-        )
+        await request.app["music_assistant"].connect(**body)
     except LoginError as e:
         raise _bad_request(str(e)) from None
     return web.json_response(_panel_status(request))

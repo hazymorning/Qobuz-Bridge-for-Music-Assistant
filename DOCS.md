@@ -15,8 +15,9 @@ previous or clearing the queue in Music Assistant show the speaker as stopped.
 - Music Assistant (the add-on, or a server on your network) with Qobuz set up under
   **Settings → Providers**. Ideally use the same Qobuz account as in the Qobuz app.
 - A Qobuz subscription and the Qobuz app.
-- A password for your Music Assistant user. If you only ever open Music Assistant from the Home
-  Assistant sidebar, you may have none yet: set one in your Music Assistant user profile.
+- Your Music Assistant username and password, or a long-lived token from your Music Assistant
+  user profile (if you only ever open Music Assistant from the Home Assistant sidebar, you may
+  have no password: use a token).
 
 ## Setup
 
@@ -35,9 +36,10 @@ previous or clearing the queue in Music Assistant show the speaker as stopped.
    access. The panel also shows that address as a link, in case no tab opens. If the login does
    not finish, the panel says so; try again.
 5. **Connect to Music Assistant.** Enter your Music Assistant username and password and tap
-   **Connect**. The address is filled in for the Music Assistant add-on (`http://127.0.0.1:8095`);
-   change it if yours runs elsewhere. The add-on uses your username and password once to get a
-   long-lived token named "MA Qobuz Bridge" and keeps only the token.
+   **Connect**. The add-on uses them once to get a long-lived token named "MA Qobuz Bridge" and
+   keeps only the token. Or tap **Use a token instead** and paste a long-lived token you created
+   in your Music Assistant user profile. The address is filled in for the Music Assistant add-on
+   (`http://127.0.0.1:8095`); change it if yours runs elsewhere.
 6. **Choose the players.** **All my Music Assistant players** is on by default. Switch it off to
    tick only the players and groups you want.
 7. **Play.** In the Qobuz app, tap the device picker and choose a speaker. Names end in **(MA)**.

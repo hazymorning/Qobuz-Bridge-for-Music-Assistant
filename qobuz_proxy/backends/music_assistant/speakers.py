@@ -146,22 +146,28 @@ class MusicAssistantSpeakers:
         if logged_in:
             await self.update_speakers()
 
-    async def connect(self, url: str, username: str, password: str) -> None:
-        """Log in to MA, save the new token and reconnect.
+    async def connect(
+        self, url: str = "", username: str = "", password: str = "", token: str = ""
+    ) -> None:
+        """Log in to MA (or check a token made in MA), save the token and reconnect.
 
         Raises:
             LoginError: with a message for the web UI.
         """
         if self._connection is None:
             raise LoginError(self._unsupported_reason)
-        from .connection import login_and_create_token
+        from .connection import check_token, login_and_create_token
 
-        if not username.strip() or not password:
-            raise LoginError("Enter your Music Assistant username and password.")
+        token = token.strip()
+        if not token and (not username.strip() or not password):
+            raise LoginError("Enter your Music Assistant username and password, or a token.")
         url = normalize_url(url) or DEFAULT_URL
         async with self._login_lock:
             try:
-                token, name = await login_and_create_token(url, username.strip(), password)
+                if token:
+                    name = await check_token(url, token)
+                else:
+                    token, name = await login_and_create_token(url, username.strip(), password)
             except LoginError as e:
                 logger.warning(f"Music Assistant login failed: {e}")
                 raise
