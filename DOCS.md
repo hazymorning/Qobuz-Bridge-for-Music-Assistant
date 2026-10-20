@@ -15,12 +15,16 @@ previous or clearing the queue in Music Assistant show the speaker as stopped.
 - Music Assistant (the add-on, or a server on your network) with Qobuz set up under
   **Settings → Providers**. Ideally use the same Qobuz account as in the Qobuz app.
 - A Qobuz subscription and the Qobuz app.
+- A password for your Music Assistant user. If you only ever open Music Assistant from the Home
+  Assistant sidebar, you may have none yet: set one in your Music Assistant user profile.
 
 ## Setup
 
-1. **Add the repository.** **Settings → Add-ons** (called **Apps** in newer versions)
-   **→ Add-on Store → ⋮ → Repositories**, paste
-   `https://github.com/hazymorning/ma-qobuz-bridge` and tap **Add**.
+1. **Add the repository.** Tap
+   [Add the repository to Home Assistant](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fhazymorning%2Fma-qobuz-bridge).
+   If the link does not work for you, open **Settings → Add-ons** (called **Apps** in newer
+   versions) **→ Add-on Store → ⋮ → Repositories** and add
+   `https://github.com/hazymorning/ma-qobuz-bridge`.
 2. **Install and start.** The add-on is built on your box, which takes a few minutes on a
    Raspberry Pi. If the build fails, the reason is in **Settings → System → Logs → Supervisor**.
 3. **Open the panel.** On its first start the add-on turns on **Show in sidebar** and
@@ -28,17 +32,15 @@ previous or clearing the queue in Music Assistant show the speaker as stopped.
 4. **Log in to Qobuz.** Qobuz's login page cannot open inside Home Assistant, so the button opens
    the add-on's own address (`http://<home-assistant-ip>:8689`) in a new tab. Sign in there, then
    come back. Do it from your home network: it does not work through Nabu Casa or other remote
-   access. If no tab opens, the panel shows the address as a link.
-5. **Connect to Music Assistant.** The address is filled in (`http://127.0.0.1:8095` when Music
-   Assistant runs as an add-on on the same box). Enter your Music Assistant username and password
-   and tap **Connect**. The add-on uses them once to get a long-lived token named "MA Qobuz Bridge"
-   and keeps only the token.
+   access. The panel also shows that address as a link, in case no tab opens. If the login does
+   not finish, the panel says so; try again.
+5. **Connect to Music Assistant.** Enter your Music Assistant username and password and tap
+   **Connect**. The address is filled in for the Music Assistant add-on (`http://127.0.0.1:8095`);
+   change it if yours runs elsewhere. The add-on uses your username and password once to get a
+   long-lived token named "MA Qobuz Bridge" and keeps only the token.
 6. **Choose the players.** **All my Music Assistant players** is on by default. Switch it off to
    tick only the players and groups you want.
-7. **Play.** In the Qobuz app, tap the device picker and choose a player. Names end in **(MA)**.
-
-If you only ever open Music Assistant from the Home Assistant sidebar, your Music Assistant user
-may have no password yet. Set one in Music Assistant (your user profile) first.
+7. **Play.** In the Qobuz app, tap the device picker and choose a speaker. Names end in **(MA)**.
 
 ## Status checks
 
@@ -113,5 +115,6 @@ never in the log. They are part of Home Assistant backups of the add-on.
 ## Testing a branch
 
 Add `#branch-name` to the repository URL when you add it. That installs a separate copy of the
-add-on with its own storage, so you log in again. A new commit without a version change is not
-offered as an update: use **Check for updates** in the store, then **Rebuild** on the add-on page.
+add-on with its own storage, so you log in again. Stop the main add-on first: both copies use port
+8689 and the same speakers. A new commit without a version change is not offered as an update:
+use **Check for updates** in the store, then **Rebuild** on the add-on page.

@@ -1,6 +1,7 @@
 # Music Assistant backend: how it works
 
 For people working on the code. Users: see the [README](../README.md) and [DOCS.md](../DOCS.md).
+Checks, tests, merging upstream and releases: [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## The idea
 
@@ -24,22 +25,30 @@ is asked.
 
 | File | Role |
 |---|---|
-| `backends/music_assistant/connection.py` | One websocket to MA for all players. Builds a new `MusicAssistantClient` per attempt (the client is single-use), reconnects with capped backoff, stops when MA rejects the token, maps errors, times out every call, hands events to listeners by player id. Also the username/password → long-lived token login. |
-| `backends/music_assistant/backend.py` | `MusicAssistantBackend`: one MA player or group. |
-| `backends/music_assistant/speakers.py` | `MusicAssistantSpeakers`: owns the connection, decides which players to expose, starts and stops their speakers, stable UUIDs (`uuid5(namespace, "music_assistant:<player_id>")`) and ports (8700+, remembered). |
-| `backends/music_assistant/settings.py` | `music_assistant.json` in the data dir (mode 0600): address, token, exposure choices, known players and their ports, and the MA queue items each backend created. |
-| `webui/music_assistant_routes.py`, `webui/static/panel.*` | The panel and its API. |
-| `rootfs/start.py` | Add-on entry point: applies the options, turns on the sidebar panel once, runs the app. |
-
-Hooks in upstream files are kept small so `git merge upstream/main` stays easy: `Speaker(...,
-backend=)`, a few `backend_type == "music_assistant"` checks in `speaker.py`, `TrackUnavailableError`,
-`reports_external_resume`, `on_volume_change` and the `ExternalPlaybackAware` protocol in
-`backends/base.py`, `start_position_ms` in `BackendTrackMetadata`, and the external-resume and
-unplayable-track hooks in `player.py`. Expect merge conflicts only in those and in `README.md`,
-`index.html` and `routes.py` (keep ours).
+| `qobuz_proxy/backends/music_assistant/connection.py` | One websocket to MA for all players. Builds a new `MusicAssistantClient` per attempt (the client is single-use), reconnects with capped backoff, stops when MA rejects the token, maps errors, times out every call, hands events to listeners by player id. Also the username/password → long-lived token login. |
+| `qobuz_proxy/backends/music_assistant/backend.py` | `MusicAssistantBackend`: one MA player or group. |
+| `qobuz_proxy/backends/music_assistant/speakers.py` | `MusicAssistantSpeakers`: owns the connection, decides which players to expose, starts and stops their speakers, stable UUIDs (`uuid5(namespace, "music_assistant:<player_id>")`) and ports (8700+, remembered). |
+| `qobuz_proxy/backends/music_assistant/settings.py` | `music_assistant.json` in the data dir (mode 0600): address, token, username, exposure choices, known players and their ports, and the MA queue items each backend created. |
+| `qobuz_proxy/webui/music_assistant_routes.py`, `qobuz_proxy/webui/static/index.html`, `qobuz_proxy/webui/static/panel.js`, `qobuz_proxy/webui/static/panel.css` | The panel and its API. |
+| `rootfs/start.py` | Add-on entry point: applies the options, turns on the sidebar panel and watchdog once, makes `/data` private, drops to an unprivileged user, runs the app. |
 
 The MA client needs Python 3.13. Everything that imports it is imported lazily, so the rest of
 QobuzProxy still runs on 3.10.
+
+## Hooks in upstream files
+
+Kept small so `git merge upstream/main` stays easy; `tests/test_upstream_changes.py` fails if a
+merge loses one. How to resolve conflicts: [CONTRIBUTING.md](../CONTRIBUTING.md#merging-upstream).
+
+| File | Hooks |
+|---|---|
+| `qobuz_proxy/app.py` | Builds, starts and stops `MusicAssistantSpeakers`; calls `set_qobuz_logged_in` on Qobuz login and logout; `_make_music_assistant_speaker`; `web_app["music_assistant"]` for the panel; `_check_speaker` (the web UI refuses a speaker the next start would reject). |
+| `qobuz_proxy/speaker.py` | `Speaker(..., backend=)`; the `backend_type == "music_assistant"` checks (no play reports, no track reload on a quality change); volume dispatch (`_dispatch_volume`: a volume broadcast reaches only the active speaker) and device-volume reporting (`_on_device_volume_change`); `ExternalPlaybackAware` instead of the DLNA-only checks. |
+| `qobuz_proxy/playback/player.py` | Follows a resume made on the device (`_follow_external_resume`); skips a track the backend cannot play (`TrackUnavailableError`). |
+| `qobuz_proxy/backends/base.py` | `TrackUnavailableError`, `reports_external_resume`, `on_volume_change` and the `ExternalPlaybackAware` protocol. |
+| `qobuz_proxy/backends/types.py` | `start_position_ms` in `BackendTrackMetadata`. |
+| `qobuz_proxy/webui/routes.py` | One `register_music_assistant_routes` call (and its import). |
+| `pyproject.toml` | The `music-assistant` extra, the extra dev dependencies, and the mypy and pytest settings. |
 
 ## Ownership rules
 
@@ -60,10 +69,11 @@ Keep these when changing the backend:
 | Qobuz app | Music Assistant |
 |---|---|
 | play | `player_queues/play_media` `replace` (a start mid-track: `clear` + `add` + `play_index(seek_position)`) |
+| play of the track MA already plays or has paused (e.g. after an add-on restart) | continued where it is (`play` if paused), not started again |
 | next track known | `play_media` `replace_next` once MA really plays the current track (gapless) |
 | next (already queued) | `play_index` on the queued item |
 | pause / resume / stop / seek | `pause` / `play` / `stop` / `seek` (stop only while MA still plays our item) |
-| volume | `players/cmd/group_volume` (a plain volume set for a single player) |
+| volume | `players/cmd/group_volume` (MA applies it as a plain volume set on a single player) |
 | next track changed | `delete_item`; an item the player already buffered is marked stale and stepped past |
 | first play after a selection | repeat and autoplay turned off on that queue |
 
@@ -73,25 +83,29 @@ Keep these when changing the backend:
 |---|---|
 | moves onto our queued next item | next track |
 | our item idle near its end, no MA play action just before | track ended → next track or end of queue |
-| idle mid-track, stop/next/seek in MA, queue cleared, "previous" to an older item | stopped at that position (session kept) |
+| stop in MA, idle mid-track or right after a next/seek in MA, queue cleared, "previous" to an older item | stopped at that position (session kept) |
+| the player never starts our track, or reports it playing far past its end | stopped |
 | paused / playing again / seek / volume | the same in the app |
 | anything else on the queue, or another source on the player | external playback: session released |
 | unreachable for 20 s while playing | stopped |
 
+MA events reach `_on_event`, which runs `_check_queue` and, for our current item,
+`_check_our_item`. What the QobuzPlayer must act on is pushed through the `AudioBackend`
+callbacks: track ends (`_report_ended`), next tracks (`_promote_armed`), stops
+(`_report_interrupted`), seeks (`_update_position`) and volume (`_report_device_volume`). A pause
+or resume in MA only changes what `get_state()` returns: the app sees it when the QobuzPlayer
+polls `get_state()` every 0.5 s (`qobuz_proxy/playback/player.py`). Each poll also runs
+`_check_queue`, so a decision still waiting when MA goes quiet is made anyway. `pause()`,
+`resume()`, `seek()` and `stop()` are the other direction.
+
 ## Tests
 
-`tests/fake_music_assistant.py` is an in-memory Music Assistant 2.10.7 server that drives the real
-`music-assistant-client` (only the websocket is fake). Time only moves with `advance_time`, and
-`settle()` never sleeps, so `tests/conftest.py` shrinks the backend's timing constants.
-`tests/rig.py` wires one player like production, from the Qobuz websocket down. The test files
-are named after what they cover: `test_qobuz_app.py`, `test_music_assistant_ui.py`,
-`test_recovery.py`, `test_connection.py`, `test_speakers.py`, `test_panel.py` and
-`test_upstream_changes.py` (the hooks above).
+How the tests are built and what each file covers: [CONTRIBUTING.md](../CONTRIBUTING.md#tests).
 
 ## Add-on packaging
 
 The repository root is the add-on: `config.json` (JSON so it does not clash with QobuzProxy's
 `config.yaml`), `Dockerfile.amd64`/`Dockerfile.aarch64` (the Supervisor prefers them over the
-upstream `Dockerfile`; keep them identical), `rootfs/`, `repository.yaml`, `translations/` and
-`DOCS.md`. Never add another `config.{yaml,yml,json}` or a `build.*` file to the tree. Bump
-`version` in `config.json` so Home Assistant offers the update.
+upstream `Dockerfile`; keep them identical), `rootfs/`, `repository.yaml`, `translations/`,
+`icon.png`, `logo.png` and `DOCS.md`. Never add another `config.{yaml,yml,json}` or a `build.*`
+file to the tree.

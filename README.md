@@ -10,20 +10,23 @@ a Qobuz subscription.
 
 ## Install (from your phone)
 
-1. In Home Assistant open **Settings → Add-ons** (called **Apps** in newer versions) **→ Add-on
-   Store → ⋮ → Repositories**, paste
-   `https://github.com/hazymorning/ma-qobuz-bridge` and tap **Add**.
+1. [Add the repository to Home Assistant](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fhazymorning%2Fma-qobuz-bridge).
+   If the link does not work for you, open **Settings → Add-ons** (called **Apps** in newer
+   versions) **→ Add-on Store → ⋮ → Repositories** and add
+   `https://github.com/hazymorning/ma-qobuz-bridge`.
 2. Open **MA Qobuz Bridge**, tap **Install**, then **Start**. The add-on is built
    on your Home Assistant box, which takes a few minutes on a Raspberry Pi.
 3. Open **MA Qobuz Bridge** in the sidebar. If it is not there, tap **Open Web UI** on the add-on page.
 4. Tap **Log in to Qobuz**, sign in on the page that opens, then come back to the panel. Do this
    while your phone is on your home Wi-Fi.
 5. Under **Music Assistant**, enter your Music Assistant username and password and tap
-   **Connect**. The address is already filled in.
+   **Connect**. The address is filled in for the Music Assistant add-on; change it if yours runs
+   elsewhere. No Music Assistant password yet (you only open it from the sidebar)? Set one in
+   your Music Assistant user profile first.
 6. Under **Speakers in the Qobuz app**, leave **All my Music Assistant players** on, or switch it
    off and tick the players you want.
 
-Now open the Qobuz app, tap the device picker and choose a player. Their names end in **(MA)**.
+Now open the Qobuz app, tap the device picker and choose a speaker. Their names end in **(MA)**.
 
 ## Update
 
@@ -36,12 +39,13 @@ logins and choices are kept.
   access.
 - Your phone and Home Assistant must be on the same network, because the Qobuz app finds the
   speakers with mDNS.
-- If you only ever open Music Assistant from the Home Assistant sidebar, set a password for your
-  user in Music Assistant first.
 - Music Assistant plays the music with its own Qobuz account. A track that account cannot play is
   skipped.
 - The Qobuz app cannot group speakers. Make a group in Music Assistant; it shows up as one speaker.
 - When someone plays something else on the player in Music Assistant, the add-on lets go and the
   Qobuz app shows the speaker as stopped.
-- If another app plays directly on a speaker (for example a WiiM's own Qobuz Connect), the Qobuz
-  app only notices when the track would have ended.
+- If another app plays directly on the device behind a player (for example a WiiM's own Qobuz
+  Connect), the Qobuz app only notices when the track would have ended.
+
+More: [DOCS.md](DOCS.md) (also the add-on's **Documentation** tab) and, for working on the code,
+[CONTRIBUTING.md](CONTRIBUTING.md).

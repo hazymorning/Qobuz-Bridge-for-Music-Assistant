@@ -2,15 +2,18 @@
 
 ## 0.2.0
 
-- New, shorter name: MA Qobuz Bridge.
+- New, shorter name: MA Qobuz Bridge. The repository moved to
+  https://github.com/hazymorning/ma-qobuz-bridge and the old address keeps working, so keep it
+  (adding the new address installs a second copy with its own logins).
 - The Music Assistant login takes a username and password only. The pasted-token option is gone;
   if you have no Music Assistant password, set one in your Music Assistant user profile.
 - Speakers always end in " (MA)"; the switch to leave it off is gone.
 - The panel no longer manages DLNA or local-audio speakers, and no longer guesses the Music
   Assistant address (it starts at `http://127.0.0.1:8095`).
+- A failed Qobuz login now says so in the panel.
+- The panel always loads its latest version after an update.
 - The panel refuses requests from other websites and can't be framed by them.
 - The add-on runs as an unprivileged user and keeps its files in `/data` readable only by itself.
-- A speaker the next start would reject is refused in the web UI instead of stopping the add-on.
 - A Music Assistant connection that keeps dropping right away now waits longer between retries.
 - Upgraded aiohttp, multidict and PyJWT past known vulnerabilities.
 - After this update, music that was already playing is not picked up again by the Qobuz app;
