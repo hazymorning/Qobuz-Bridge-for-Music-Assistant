@@ -234,6 +234,7 @@ class TestReconnect:
         delays = RecordedDelays(REAL_RECONNECT_DELAYS)
         delays.picked = []
         monkeypatch.setattr(connection_module, "RECONNECT_DELAYS_SECONDS", delays)
+        monkeypatch.setattr(connection_module, "STABLE_CONNECTION_SECONDS", 0.0)
         server.reachable = False
         await conn.start()
         await wait_for(lambda: len(delays.picked) >= 3, server, what="retries")
@@ -246,6 +247,23 @@ class TestReconnect:
         await wait_for(lambda: len(delays.picked) > picked_before_drop, server)
         assert delays.picked[picked_before_drop] == REAL_RECONNECT_DELAYS[0]
         await wait_for(lambda: conn.is_connected, server, what="reconnect")
+
+    async def test_a_connection_that_keeps_dropping_at_once_keeps_backing_off(
+        self,
+        conn: MusicAssistantConnection,
+        server: FakeMusicAssistantServer,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        delays = RecordedDelays(REAL_RECONNECT_DELAYS)
+        delays.picked = []
+        monkeypatch.setattr(connection_module, "RECONNECT_DELAYS_SECONDS", delays)
+        await conn.start()
+        for drops in range(1, 4):
+            await wait_for(lambda: conn.is_connected, server, what="connection")
+            server.drop_connections()
+            await wait_for(lambda: len(delays.picked) >= drops, server, what="retry")
+
+        assert delays.picked == list(REAL_RECONNECT_DELAYS[:3])
 
     @pytest.mark.parametrize("graceful", [True, False], ids=["closed", "error"])
     async def test_lost_connection_is_retried_until_ma_is_back_and_events_flow_again(

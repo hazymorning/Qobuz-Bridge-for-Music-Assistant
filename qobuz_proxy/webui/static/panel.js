@@ -183,6 +183,7 @@
 
     function poll() {
         clearTimeout(pollTimer);
+        if (document.hidden) return; // resumes on visibilitychange
         request("GET", "api/music-assistant/status").then(function (st) {
             failures = 0;
             show($("offline"), false);
@@ -272,5 +273,6 @@
     $("players").addEventListener("change", onPlayerTicked);
     // Coming back from the Qobuz login tab: refresh right away
     window.addEventListener("focus", poll);
+    document.addEventListener("visibilitychange", poll);
     poll();
 })();

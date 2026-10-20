@@ -8,6 +8,7 @@ after a disconnect, so every connection attempt builds a new one.
 import asyncio
 import contextlib
 import logging
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Awaitable, Callable, Optional, TypeVar
@@ -47,6 +48,8 @@ RECONNECT_DELAYS_SECONDS = (1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0)
 CONNECT_TIMEOUT_SECONDS = 15.0
 LOAD_TIMEOUT_SECONDS = 30.0
 CALL_TIMEOUT_SECONDS = 10.0
+# A connection that drops sooner than this does not reset the reconnect backoff
+STABLE_CONNECTION_SECONDS = 30.0
 
 ClientFactory = Callable[[str, aiohttp.ClientSession, str], Any]
 EventListener = Callable[[Any], None]
@@ -287,14 +290,14 @@ class MusicAssistantConnection:
             if outcome is None:
                 return
             if outcome:
-                attempt = 0  # a working connection dropped (e.g. MA restarted): retry soon
+                attempt = 0  # a healthy connection dropped (e.g. MA restarted): retry soon
             delay = RECONNECT_DELAYS_SECONDS[min(attempt, len(RECONNECT_DELAYS_SECONDS) - 1)]
             attempt += 1
             logger.info(f"Reconnecting to Music Assistant in {delay:.0f}s")
             await asyncio.sleep(delay)
 
     async def _connect_and_listen(self) -> Optional[bool]:
-        """One connection: True if it worked until it dropped, False if it failed, None to stop."""
+        """One connection: True if it was healthy until it dropped, False if not, None to stop."""
         if self._http is None:
             self._http = aiohttp.ClientSession()
         self._set_status(ConnectionState.CONNECTING, "Connecting to Music Assistant…")
@@ -350,6 +353,7 @@ class MusicAssistantConnection:
                 return False
 
             self._client = client
+            connected_at = time.monotonic()
             self._timeouts_in_a_row = 0
             version = client.server_info.server_version
             has_qobuz_provider = any(p.domain == "qobuz" and p.available for p in client.providers)
@@ -374,7 +378,7 @@ class MusicAssistantConnection:
                 ConnectionState.DISCONNECTED,
                 "Lost the connection to Music Assistant; reconnecting…",
             )
-            return True
+            return time.monotonic() - connected_at >= STABLE_CONNECTION_SECONDS
         finally:
             self._client = None
             if listen is not None and not listen.done():

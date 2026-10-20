@@ -11,6 +11,7 @@ stays off and the web UI says why.
 """
 
 import asyncio
+import contextlib
 import itertools
 import logging
 import socket
@@ -434,8 +435,17 @@ class MusicAssistantSpeakers:
 
     async def _wait_until_connected(self) -> None:
         """Give a new login a few seconds to connect, so the web UI shows the result."""
-        deadline = time.monotonic() + CONNECT_WAIT_SECONDS
-        while time.monotonic() < deadline and self._connection is not None:
-            if self._connection.status.state.value not in ("connecting", "disconnected"):
-                return
-            await asyncio.sleep(0.1)
+        assert self._connection is not None
+        settled = asyncio.Event()
+
+        def on_status(status: Any) -> None:
+            if status.state.value not in ("connecting", "disconnected"):
+                settled.set()
+
+        on_status(self._connection.status)
+        self._connection.add_status_listener(on_status)
+        try:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(settled.wait(), CONNECT_WAIT_SECONDS)
+        finally:
+            self._connection.remove_status_listener(on_status)
