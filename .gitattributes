@@ -1,5 +1,4 @@
-# The add-on image runs these with /bin/sh and python3 on Linux: a CRLF
+# The add-on image is built from the Dockerfiles and runs rootfs/ on Linux: a CRLF
 # checkout (e.g. a commit from Windows) would break them.
-*.sh text eol=lf
 rootfs/** text eol=lf
 Dockerfile* text eol=lf

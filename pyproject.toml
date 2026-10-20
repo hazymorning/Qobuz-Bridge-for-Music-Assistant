@@ -55,8 +55,10 @@ music-assistant = [
 # by default on `uv sync` — see [tool.uv].default-groups below.
 [dependency-groups]
 dev = [
+    "qobuz-proxy[music-assistant]",  # the tests drive the Music Assistant backend
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
+    "pytest-xdist>=3",
     "mypy>=1.7.0",
     "ruff>=0.1.0",
     "types-PyYAML>=6.0",
@@ -65,7 +67,7 @@ dev = [
 [project.scripts]
 qobuz-proxy = "qobuz_proxy.cli:main"
 
-# uv manages the local environment (.venv + uv.lock). See .claude/CLAUDE.md.
+# uv manages the local environment (.venv + uv.lock).
 [tool.uv]
 package = true                 # build & install this project (editable) into the env
 default-groups = ["dev"]       # `uv sync` includes the dev group unless --no-dev
@@ -88,17 +90,43 @@ quote-style = "double"
 "qobuz_proxy/__init__.py" = ["E402"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.13"
 warn_return_any = true
 warn_unused_ignores = true
+exclude = ["qobuz_proxy/proto/"]
 
-# The Music Assistant packages need Python 3.13 and use syntax mypy rejects
-# when targeting 3.10, so their types are not followed (they become Any).
+# The Music Assistant packages are checked against their own types (they need the
+# python_version above), even if a release ships without its py.typed marker.
 [[tool.mypy.overrides]]
 module = ["music_assistant_client", "music_assistant_client.*", "music_assistant_models", "music_assistant_models.*"]
-follow_imports = "skip"
 follow_untyped_imports = true
+
+# The generated protobuf code (excluded above) and the optional local-audio libraries, which
+# `uv sync` leaves out
+[[tool.mypy.overrides]]
+module = ["qobuz_proxy.proto.*", "sounddevice", "numpy"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+# Type errors inherited from upstream QobuzProxy, left as they are so upstream changes merge cleanly
+[[tool.mypy.overrides]]
+module = [
+    "qobuz_proxy.backends.dlna.proxy_server",
+    "qobuz_proxy.backends.local.backend",
+    "qobuz_proxy.connect.discovery",
+    "qobuz_proxy.connect.ws_manager",
+]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["qobuz_proxy.speaker"]
+disable_error_code = ["arg-type", "misc"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+filterwarnings = [
+    # Upstream code: its web app uses plain string keys, its Qobuz websocket reads close codes
+    "ignore::aiohttp.web_exceptions.NotAppKeyWarning",
+    "ignore:ConnectionClosed.(code|reason) is deprecated:DeprecationWarning",
+]

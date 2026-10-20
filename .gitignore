@@ -1,7 +1,3 @@
-# Claude Code
-.claude/settings.local.json
-.worktrees/
-
 # Python
 __pycache__/
 *.py[cod]

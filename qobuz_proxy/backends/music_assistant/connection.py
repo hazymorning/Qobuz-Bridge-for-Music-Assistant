@@ -1,16 +1,12 @@
 """
-Shared connection to a Music Assistant server.
+One websocket to Music Assistant, shared by every exposed player.
 
-One :class:`MusicAssistantConnection` serves every exposed MA player. It keeps a
-websocket to MA open with the official ``music-assistant-client``, reconnects
-with backoff when MA restarts or is unreachable, stops retrying when MA no
-longer accepts the saved token, and fans MA events out to the backends.
-
-The client never reconnects by itself and an instance cannot be reused after a
-disconnect, so every attempt builds a new client.
+A ``MusicAssistantClient`` never reconnects by itself and cannot be reused
+after a disconnect, so every connection attempt builds a new one.
 """
 
 import asyncio
+import contextlib
 import logging
 import time
 from dataclasses import dataclass
@@ -21,12 +17,8 @@ import aiohttp
 from music_assistant_client import MusicAssistantClient, login
 from music_assistant_client.exceptions import (
     CannotConnect,
-    ConnectionClosed,
-    ConnectionFailed,
     InvalidServerVersion,
-    InvalidState,
     MusicAssistantClientException,
-    NotConnected,
 )
 from music_assistant_models.enums import PlayerType
 from music_assistant_models.errors import (
@@ -37,27 +29,36 @@ from music_assistant_models.errors import (
     LoginFailed,
     MusicAssistantError,
 )
+from music_assistant_models.player import Player
+from music_assistant_models.player_queue import PlayerQueue
+
+from . import LoginError
 
 logger = logging.getLogger(__name__)
+# The client's debug log prints every websocket message, the auth token included
+logging.getLogger("music_assistant_client").setLevel(logging.INFO)
 
 T = TypeVar("T")
 
-# What a Qobuz Connect device can stand for: real players, stereo pairs, groups.
-EXPOSABLE_PLAYER_TYPES = {
+PLAYER_TYPES = {
     PlayerType.PLAYER: "player",
     PlayerType.STEREO_PAIR: "stereo_pair",
     PlayerType.GROUP: "group",
 }
+TOKEN_NAME = "MA Qobuz Bridge"
+RECONNECT_DELAYS_SECONDS = (1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0)
+CONNECT_TIMEOUT_SECONDS = 15.0
+LOAD_TIMEOUT_SECONDS = 30.0
+CALL_TIMEOUT_SECONDS = 10.0
+# A connection that drops sooner than this does not reset the reconnect backoff
+STABLE_CONNECTION_SECONDS = 30.0
 
-TOKEN_NAME = "Qobuz Bridge"
-
-ClientFactory = Callable[[str, aiohttp.ClientSession, str], Any]
+ClientFactory = Callable[[str, aiohttp.ClientSession, str], MusicAssistantClient]
 EventListener = Callable[[Any], None]
+StatusListener = Callable[["ConnectionStatus"], None]
 
 
-class MAConnectionState(str, Enum):
-    """Connection state, as shown in the web UI."""
-
+class ConnectionState(str, Enum):
     NOT_CONFIGURED = "not_configured"
     CONNECTING = "connecting"
     CONNECTED = "connected"
@@ -65,576 +66,387 @@ class MAConnectionState(str, Enum):
     AUTH_FAILED = "auth_failed"
 
 
-@dataclass
-class MAConnectionStatus:
-    """Snapshot of the connection for the UI and the backends."""
-
-    state: MAConnectionState
-    url: str = ""
-    message: str = ""  # plain language, safe to show
+@dataclass(frozen=True)
+class ConnectionStatus:
+    state: ConnectionState
+    message: str = ""  # plain language, shown in the web UI
     server_version: str = ""
-    qobuz_provider: Optional[bool] = None  # None = unknown (not connected)
-    changed_at: float = 0.0  # time.monotonic() of the last state change
+    has_qobuz_provider: bool = False  # MA has a working Qobuz provider
 
 
 @dataclass(frozen=True)
-class MAPlayerInfo:
-    """An MA player or group that could be exposed as a Qobuz Connect device."""
+class PlayerInfo:
+    """An enabled MA player, stereo pair or group."""
 
     player_id: str
     name: str
-    player_type: str  # "player" | "group" | "stereo_pair"
+    type: str  # a PLAYER_TYPES value
     available: bool
-    enabled: bool
-    hidden: bool  # hidden in MA's UI
-    provider: str
+    hidden: bool  # hidden in MA's own UI
 
 
-class MANotConnectedError(RuntimeError):
+class NotConnectedError(RuntimeError):
     """Music Assistant is not connected, or the connection dropped mid-call."""
-
-
-class MALoginError(Exception):
-    """A login or token problem; the message is plain language for the UI."""
 
 
 def _unreachable_message(url: str) -> str:
     return f"Can't reach Music Assistant at {url}. Is the Music Assistant add-on running?"
 
 
-def _is_invalid_token(err: BaseException) -> bool:
-    """Whether MA rejected the token itself (expired, revoked, user removed)."""
-    cause = err.__cause__
+def _token_rejected(err: Exception) -> bool:
+    """Whether MA turned down the token itself (expired, revoked, user removed)."""
     return (
-        isinstance(err, InvalidToken)
-        or isinstance(cause, InvalidToken)
-        or ("invalid or expired token" in str(err).lower())
+        isinstance(err, AuthenticationRequired)
+        or isinstance(err.__cause__, InvalidToken)
+        or "invalid or expired token" in str(err).lower()
     )
 
 
-def _default_client_factory(url: str, session: aiohttp.ClientSession, token: str) -> Any:
-    return MusicAssistantClient(url, session, token=token)
-
-
 class MusicAssistantConnection:
-    """Keeps one websocket to Music Assistant and shares it between backends."""
-
-    RECONNECT_DELAYS_SECONDS = (1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0)
-    CONNECT_TIMEOUT_SECONDS = 15.0
-    INIT_TIMEOUT_SECONDS = 30.0
+    """Keeps one websocket to Music Assistant open and shares it."""
 
     def __init__(
-        self,
-        url: str = "",
-        token: str = "",
-        *,
-        client_factory: Optional[ClientFactory] = None,
+        self, url: str = "", token: str = "", client_factory: ClientFactory = MusicAssistantClient
     ) -> None:
-        self._url = url.rstrip("/")
+        self._url = url
         self._token = token
-        self._client_factory = client_factory or _default_client_factory
-        self._session: Optional[aiohttp.ClientSession] = None
-        self._client: Optional[Any] = None
+        self._client_factory = client_factory
+        self._http: Optional[aiohttp.ClientSession] = None
+        self._client: Optional[MusicAssistantClient] = None
         self._task: Optional[asyncio.Task[None]] = None
-        self._status = MAConnectionStatus(
-            state=MAConnectionState.NOT_CONFIGURED
-            if not (url and token)
-            else MAConnectionState.DISCONNECTED,
-            url=self._url,
-            message="" if (url and token) else "Not connected to Music Assistant yet.",
-            changed_at=time.monotonic(),
-        )
+        self._status = ConnectionStatus(ConnectionState.NOT_CONFIGURED)
         self._event_listeners: dict[Optional[str], list[EventListener]] = {}
-        self._state_listeners: list[Callable[[MAConnectionStatus], None]] = []
-        self._timeouts = 0  # consecutive command timeouts
-        self._was_connected = False  # the last attempt got as far as CONNECTED
-
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
+        self._status_listeners: list[StatusListener] = []
+        self._timeouts_in_a_row = 0
+        self._background: set[asyncio.Task[Any]] = set()
 
     @property
-    def url(self) -> str:
-        return self._url
-
-    @property
-    def status(self) -> MAConnectionStatus:
+    def status(self) -> ConnectionStatus:
         return self._status
 
     @property
     def is_connected(self) -> bool:
-        return self._status.state == MAConnectionState.CONNECTED and self._client is not None
-
-    @property
-    def client(self) -> Optional[Any]:
-        """The live client, only while connected."""
-        return self._client if self.is_connected else None
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
+        return self._client is not None
 
     async def start(self) -> None:
-        """Start connecting in the background (no-op without an address and token)."""
-        if self._task and not self._task.done():
+        """Start connecting in the background; without an address and token, do nothing."""
+        if self._task is not None and not self._task.done():
             return
         if not (self._url and self._token):
-            self._set_state(
-                MAConnectionState.NOT_CONFIGURED, "Not connected to Music Assistant yet."
-            )
+            self._set_status(ConnectionState.NOT_CONFIGURED)
             return
-        # Connecting from now on, so callers waiting for the result don't stop early
-        self._set_state(MAConnectionState.CONNECTING, "Connecting to Music Assistant…")
-        self._task = asyncio.create_task(self._run(), name="music-assistant-connection")
+        self._set_status(ConnectionState.CONNECTING, "Connecting to Music Assistant…")
+        self._task = asyncio.create_task(self._keep_connected(), name="music-assistant-connection")
 
     async def stop(self) -> None:
-        """Disconnect and stop reconnecting. Safe to call more than once."""
+        """Disconnect and stop reconnecting."""
         task, self._task = self._task, None
-        if task and not task.done():
+        if task is not None:
             task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
-            except (asyncio.CancelledError, Exception):
-                pass
-        await self._drop_client()
-        if self._session is not None:
-            session, self._session = self._session, None
-            await session.close()
+        if self._http is not None:
+            await self._http.close()
+            self._http = None
 
-    async def reconfigure(self, url: str, token: str) -> None:
-        """Switch to a new address/token and reconnect."""
+    async def reconnect(self, url: str, token: str) -> None:
+        """Switch to another address or token."""
         await self.stop()
-        self._url = url.rstrip("/")
-        self._token = token
-        self._status.url = self._url
+        self._url, self._token = url, token
         await self.start()
 
-    # ------------------------------------------------------------------
-    # Listeners
-    # ------------------------------------------------------------------
+    def add_event_listener(self, object_id: Optional[str], listener: EventListener) -> None:
+        """Call ``listener(event)`` for MA events about ``object_id`` (None: all events).
 
-    def add_event_listener(
-        self, object_id: Optional[str], callback: EventListener
-    ) -> Callable[[], None]:
-        """Call ``callback(event)`` for MA events about ``object_id`` (None = all).
-
-        Callbacks run after the client updated its player/queue caches, so they
-        can read the new state from :meth:`get_player` / :meth:`get_queue`.
+        Listeners run after the client updated its player and queue caches.
         """
-        self._event_listeners.setdefault(object_id, []).append(callback)
+        self._event_listeners.setdefault(object_id, []).append(listener)
 
-        def remove() -> None:
-            listeners = self._event_listeners.get(object_id, [])
-            if callback in listeners:
-                listeners.remove(callback)
+    def remove_event_listener(self, object_id: Optional[str], listener: EventListener) -> None:
+        self._event_listeners.get(object_id, []).remove(listener)
 
-        return remove
+    def add_status_listener(self, listener: StatusListener) -> None:
+        self._status_listeners.append(listener)
 
-    def add_state_listener(
-        self, callback: Callable[[MAConnectionStatus], None]
-    ) -> Callable[[], None]:
-        """Call ``callback(status)`` whenever the connection state changes."""
-        self._state_listeners.append(callback)
+    def remove_status_listener(self, listener: StatusListener) -> None:
+        self._status_listeners.remove(listener)
 
-        def remove() -> None:
-            if callback in self._state_listeners:
-                self._state_listeners.remove(callback)
-
-        return remove
-
-    # ------------------------------------------------------------------
-    # State access (reads the client's caches, never calls MA)
-    # ------------------------------------------------------------------
-
-    def list_players(self) -> list[MAPlayerInfo]:
-        """Players, stereo pairs and groups MA currently knows about."""
-        client = self.client
-        if client is None:
+    def players(self) -> list[PlayerInfo]:
+        if self._client is None:
             return []
-        players = []
-        for player in client.players:
-            player_type = EXPOSABLE_PLAYER_TYPES.get(player.type)
-            if player_type is None:
-                continue
-            players.append(
-                MAPlayerInfo(
-                    player_id=player.player_id,
-                    name=player.name or player.player_id,
-                    player_type=player_type,
-                    available=bool(player.available),
-                    enabled=bool(getattr(player, "enabled", True)),
-                    hidden=bool(getattr(player, "hide_in_ui", False)),
-                    provider=str(getattr(player, "provider", "")),
-                )
+        return [
+            PlayerInfo(
+                player_id=p.player_id,
+                name=p.name or p.player_id,
+                type=PLAYER_TYPES[p.type],
+                available=p.available,
+                hidden=p.hide_in_ui,
             )
-        return players
+            for p in self._client.players
+            if p.type in PLAYER_TYPES and p.enabled
+        ]
 
-    def get_player(self, player_id: str) -> Optional[Any]:
-        client = self.client
-        return client.players.get(player_id) if client is not None else None
+    def player(self, player_id: str) -> Optional[Player]:
+        return self._client.players.get(player_id) if self._client is not None else None
 
-    def get_queue(self, queue_id: str) -> Optional[Any]:
-        client = self.client
-        return client.player_queues.get(queue_id) if client is not None else None
-
-    # ------------------------------------------------------------------
-    # Commands
-    # ------------------------------------------------------------------
+    def queue(self, queue_id: str) -> Optional[PlayerQueue]:
+        return self._client.player_queues.get(queue_id) if self._client is not None else None
 
     async def call(
         self,
         description: str,
-        fn: Callable[[Any], Awaitable[T]],
-        timeout: float = 10.0,
+        command: Callable[[MusicAssistantClient], Awaitable[T]],
+        timeout: float = CALL_TIMEOUT_SECONDS,
     ) -> T:
-        """Run one MA command, logged, with connection errors mapped.
+        """Run one MA command and log it.
 
         Raises:
-            MANotConnectedError: MA is not connected, did not answer within
-                ``timeout``, or the socket dropped mid-call.
-            MusicAssistantError: MA answered with an error (logged, re-raised).
+            NotConnectedError: MA is not connected, did not answer in time, or
+                the socket dropped mid-call.
+            MusicAssistantError: MA answered with an error.
         """
-        client = self.client
+        client = self._client
         if client is None:
-            logger.warning(f"MA ✗ {description}: not connected to Music Assistant")
-            raise MANotConnectedError("Music Assistant is not connected")
-        logger.info(f"MA → {description}")
+            logger.warning(
+                f"Music Assistant did not do {description}: not connected to Music Assistant"
+            )
+            raise NotConnectedError("Music Assistant is not connected")
+        logger.info(f"To Music Assistant: {description}")
         try:
-            result = await asyncio.wait_for(fn(client), timeout)
+            result = await asyncio.wait_for(command(client), timeout)
         except asyncio.TimeoutError:
-            self._timeouts += 1
-            logger.warning(f"MA ✗ {description}: no answer from Music Assistant in {timeout:.0f}s")
-            stuck = self._client
-            if self._timeouts >= 2 and stuck is not None and stuck is client:
-                # Probably a dead socket the heartbeat has not noticed yet
+            logger.warning(
+                f"Music Assistant did not do {description}: no answer from Music Assistant in {timeout:.0f}s"
+            )
+            self._timeouts_in_a_row += 1
+            stuck = self._timeouts_in_a_row >= 2 and self._client is client
+            if stuck:
+                # Probably a dead socket the client has not noticed yet
                 logger.warning("Music Assistant stopped answering; reconnecting")
-                asyncio.ensure_future(stuck.disconnect())
-            raise MANotConnectedError("Music Assistant did not answer in time") from None
+                self._run_in_background(client.disconnect())
+            raise NotConnectedError("Music Assistant did not answer in time") from None
         except asyncio.CancelledError:
-            # The client cancels pending commands when its socket closes. That is
-            # a lost connection unless our own task is the one being cancelled.
+            # The client cancels pending commands when its socket closes
             task = asyncio.current_task()
-            cancelling = getattr(task, "cancelling", None)
-            if task is not None and cancelling is not None and cancelling() == 0:
-                logger.warning(f"MA ✗ {description}: connection to Music Assistant lost")
-                raise MANotConnectedError("Lost the connection to Music Assistant") from None
+            if task is not None and task.cancelling() == 0:
+                logger.warning(
+                    f"Music Assistant did not do {description}: connection to Music Assistant lost"
+                )
+                raise NotConnectedError("Lost the connection to Music Assistant") from None
             raise
-        except (InvalidState, NotConnected, ConnectionClosed, ConnectionFailed) as e:
-            logger.warning(f"MA ✗ {description}: connection to Music Assistant lost ({e})")
-            raise MANotConnectedError("Lost the connection to Music Assistant") from e
+        except (MusicAssistantClientException, aiohttp.ClientError, ConnectionError) as e:
+            logger.warning(
+                f"Music Assistant did not do {description}: connection to Music Assistant lost ({e})"
+            )
+            raise NotConnectedError("Lost the connection to Music Assistant") from e
         except MusicAssistantError as e:
-            self._timeouts = 0
-            logger.warning(f"MA ✗ {description}: {type(e).__name__}: {e}")
+            self._timeouts_in_a_row = 0
+            logger.warning(f"Music Assistant did not do {description}: {type(e).__name__}: {e}")
             raise
-        self._timeouts = 0
+        self._timeouts_in_a_row = 0
         return result
 
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
-    def _set_state(
+    def _set_status(
         self,
-        state: MAConnectionState,
+        state: ConnectionState,
         message: str = "",
-        *,
-        server_version: Optional[str] = None,
-        qobuz_provider: Optional[bool] = None,
+        server_version: str = "",
+        has_qobuz_provider: bool = False,
     ) -> None:
-        changed = state != self._status.state
-        if not changed and message == self._status.message and server_version is None:
-            return  # nothing new to tell the listeners
-        self._status = MAConnectionStatus(
-            state=state,
-            url=self._url,
-            message=message,
-            server_version=(
-                server_version if server_version is not None else self._status.server_version
-            ),
-            qobuz_provider=qobuz_provider if state == MAConnectionState.CONNECTED else None,
-            changed_at=time.monotonic() if changed else self._status.changed_at,
-        )
-        for listener in list(self._state_listeners):
+        status = ConnectionStatus(state, message, server_version, has_qobuz_provider)
+        if status == self._status:
+            return
+        self._status = status
+        for listener in list(self._status_listeners):
             try:
-                listener(self._status)
-            except Exception as e:
-                logger.error(f"Music Assistant state listener error: {e}", exc_info=True)
+                listener(status)
+            except Exception:
+                logger.exception("Music Assistant status listener failed")
 
     def _dispatch(self, event: Any) -> None:
-        """Fan one MA event out to the listeners (runs in the event loop)."""
-        object_id = getattr(event, "object_id", None)
-        listeners = list(self._event_listeners.get(None, []))
-        if object_id is not None:
-            listeners += self._event_listeners.get(object_id, [])
+        """Hand one MA event to its listeners (a failing one must not end the client's loop)."""
+        listeners = self._event_listeners.get(None, []) + self._event_listeners.get(
+            event.object_id, []
+        )
         for listener in listeners:
             try:
                 listener(event)
-            except Exception as e:
-                logger.error(f"Music Assistant event listener error: {e}", exc_info=True)
+            except Exception:
+                logger.exception("Music Assistant event listener failed")
 
-    def _qobuz_provider_available(self, client: Any) -> bool:
-        return any(
-            getattr(p, "domain", "") == "qobuz" and getattr(p, "available", False)
-            for p in (client.providers or [])
-        )
+    def _run_in_background(self, coro: Awaitable[Any]) -> None:
+        task = asyncio.ensure_future(coro)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
-    async def _drop_client(self) -> None:
-        client, self._client = self._client, None
-        if client is not None:
-            try:
-                await client.disconnect()
-            except Exception as e:
-                logger.debug(f"Error disconnecting from Music Assistant: {e}")
-
-    def _backoff_delay(self, attempt: int) -> float:
-        delays = self.RECONNECT_DELAYS_SECONDS
-        return delays[min(attempt, len(delays) - 1)]
-
-    async def _run(self) -> None:
-        """Connect, listen, and reconnect until stopped or the token is rejected."""
+    async def _keep_connected(self) -> None:
+        """Connect, and reconnect with backoff, until stopped or the token is rejected."""
         attempt = 0
         while True:
-            self._was_connected = False
-            retry = await self._connect_once()
-            if not retry:
+            try:
+                outcome = await self._connect_and_listen()
+            except Exception:
+                logger.exception("Unexpected error in the Music Assistant connection")
+                self._set_status(ConnectionState.DISCONNECTED, _unreachable_message(self._url))
+                outcome = False
+            if outcome is None:
                 return
-            if self._was_connected:
-                attempt = 0  # a working connection dropped (e.g. MA restarted): retry soon
-            delay = self._backoff_delay(attempt)
+            if outcome:
+                attempt = 0  # a healthy connection dropped (e.g. MA restarted): retry soon
+            delay = RECONNECT_DELAYS_SECONDS[min(attempt, len(RECONNECT_DELAYS_SECONDS) - 1)]
             attempt += 1
             logger.info(f"Reconnecting to Music Assistant in {delay:.0f}s")
             await asyncio.sleep(delay)
 
-    async def _connect_once(self) -> bool:
-        """One connect-and-listen cycle. Returns False when retrying is pointless."""
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-        self._set_state(MAConnectionState.CONNECTING, "Connecting to Music Assistant…")
-        client = self._client_factory(self._url, self._session, self._token)
-        unsubscribe: Optional[Callable[[], None]] = None
+    async def _connect_and_listen(self) -> Optional[bool]:
+        """One connection: True if it was healthy until it dropped, False if not, None to stop."""
+        if self._http is None:
+            self._http = aiohttp.ClientSession()
+        self._set_status(ConnectionState.CONNECTING, "Connecting to Music Assistant…")
+        client = self._client_factory(self._url, self._http, self._token)
         listen: Optional[asyncio.Task[None]] = None
         try:
             try:
-                await asyncio.wait_for(client.connect(), self.CONNECT_TIMEOUT_SECONDS)
-            except (AuthenticationFailed, AuthenticationRequired, InvalidToken) as e:
-                if _is_invalid_token(e) or isinstance(e, AuthenticationRequired):
-                    logger.error(
-                        "Music Assistant rejected the saved login (token expired or revoked); "
-                        "connect again in the web UI"
-                    )
-                    self._set_state(
-                        MAConnectionState.AUTH_FAILED,
+                await asyncio.wait_for(client.connect(), CONNECT_TIMEOUT_SECONDS)
+            except (AuthenticationFailed, AuthenticationRequired) as e:
+                if _token_rejected(e):
+                    logger.error("Music Assistant rejected the saved login; log in again")
+                    self._set_status(
+                        ConnectionState.AUTH_FAILED,
                         "Music Assistant no longer accepts the saved login (it may have expired "
                         "or been removed). Connect again in this panel.",
                     )
-                    return False
+                    return None
                 logger.warning(f"Music Assistant refused the connection: {e}")
-                self._set_state(
-                    MAConnectionState.DISCONNECTED,
-                    f"Music Assistant refused the connection ({e}).",
+                self._set_status(
+                    ConnectionState.DISCONNECTED, f"Music Assistant refused the connection ({e})."
                 )
-                return True
+                return False
             except InvalidServerVersion as e:
                 logger.error(f"Unsupported Music Assistant version: {e}")
-                self._set_state(
-                    MAConnectionState.DISCONNECTED,
+                self._set_status(
+                    ConnectionState.DISCONNECTED,
                     f"This Music Assistant version is not supported ({e}).",
                 )
-                return True
+                return False
             except (
-                CannotConnect,
                 asyncio.TimeoutError,
                 OSError,
                 MusicAssistantClientException,
                 MusicAssistantError,
             ) as e:
                 logger.warning(f"Can't reach Music Assistant at {self._url}: {e}")
-                self._set_state(MAConnectionState.DISCONNECTED, _unreachable_message(self._url))
-                return True
+                self._set_status(ConnectionState.DISCONNECTED, _unreachable_message(self._url))
+                return False
 
-            unsubscribe = client.subscribe(self._dispatch)
-            ready = asyncio.Event()
-            listen = asyncio.create_task(client.start_listening(ready))
-            ready_wait = asyncio.create_task(ready.wait())
-            done, _ = await asyncio.wait(
-                {listen, ready_wait},
-                timeout=self.INIT_TIMEOUT_SECONDS,
+            client.subscribe(self._dispatch)
+            loaded = asyncio.Event()
+            listen = asyncio.create_task(client.start_listening(loaded))
+            wait_loaded = asyncio.create_task(loaded.wait())
+            await asyncio.wait(
+                {listen, wait_loaded},
+                timeout=LOAD_TIMEOUT_SECONDS,
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            ready_wait.cancel()
-            if not ready.is_set():
-                reason = "timed out loading players" if not done else "connection closed"
-                logger.warning(f"Music Assistant did not finish starting the session ({reason})")
-                self._set_state(MAConnectionState.DISCONNECTED, _unreachable_message(self._url))
-                return True
+            wait_loaded.cancel()
+            if not loaded.is_set():
+                logger.warning("Music Assistant did not send its players and queues")
+                self._set_status(ConnectionState.DISCONNECTED, _unreachable_message(self._url))
+                return False
 
             self._client = client
-            self._timeouts = 0
-            self._was_connected = True
-            server_info = getattr(client, "server_info", None)
-            version = str(getattr(server_info, "server_version", "") or "")
-            qobuz = self._qobuz_provider_available(client)
-            self._set_state(
-                MAConnectionState.CONNECTED,
-                f"Connected to Music Assistant {version}.".replace("  ", " "),
-                server_version=version,
-                qobuz_provider=qobuz,
+            connected_at = time.monotonic()
+            self._timeouts_in_a_row = 0
+            assert client.server_info is not None  # set by connect()
+            version = client.server_info.server_version
+            has_qobuz_provider = any(p.domain == "qobuz" and p.available for p in client.providers)
+            self._set_status(
+                ConnectionState.CONNECTED,
+                f"Connected to Music Assistant {version}.",
+                version,
+                has_qobuz_provider,
             )
             logger.info(
                 f"Connected to Music Assistant {version} at {self._url} "
-                f"({len(self.list_players())} players"
-                f"{', Qobuz provider ready' if qobuz else ', no Qobuz provider'})"
+                f"({len(self.players())} players, "
+                f"{'Qobuz provider ready' if has_qobuz_provider else 'no Qobuz provider'})"
             )
             try:
                 await listen
                 logger.warning("Music Assistant closed the connection")
-            except (ConnectionFailed, MusicAssistantClientException, OSError) as e:
+            except (MusicAssistantClientException, OSError) as e:
                 logger.warning(f"Connection to Music Assistant failed: {e}")
             self._client = None
-            self._set_state(
-                MAConnectionState.DISCONNECTED,
+            self._set_status(
+                ConnectionState.DISCONNECTED,
                 "Lost the connection to Music Assistant; reconnecting…",
             )
-            return True
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:  # never let the reconnect loop die
-            logger.error(f"Unexpected Music Assistant connection error: {e}", exc_info=True)
-            self._set_state(MAConnectionState.DISCONNECTED, _unreachable_message(self._url))
-            return True
+            return time.monotonic() - connected_at >= STABLE_CONNECTION_SECONDS
         finally:
+            self._client = None
             if listen is not None and not listen.done():
                 listen.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await listen
-                except (asyncio.CancelledError, Exception):
-                    pass
-            if unsubscribe is not None:
-                try:
-                    unsubscribe()
-                except ValueError:
-                    pass
-            if self._client is client:
-                self._client = None
-            try:
+            with contextlib.suppress(Exception):
                 await client.disconnect()
-            except Exception:
-                pass
 
 
-async def login_and_create_token(
-    url: str,
-    username: str,
-    password: str,
-    *,
-    token_name: str = TOKEN_NAME,
-    session: Optional[aiohttp.ClientSession] = None,
-) -> tuple[str, str]:
-    """Log in with username/password and mint a long-lived token.
+async def login_and_create_token(url: str, username: str, password: str) -> tuple[str, str]:
+    """Log in with username and password and create a long-lived token.
 
     Returns:
-        (long_lived_token, display_username)
+        (long-lived token, the user's display name)
 
     Raises:
-        MALoginError: with a plain-language message.
+        LoginError: with a plain-language message.
     """
-    url = url.rstrip("/")
-    own_session = session is None
-    sess = session or aiohttp.ClientSession()
-    try:
+    unreachable = (
+        f"Can't reach Music Assistant at {url}. Check the address and that the Music "
+        "Assistant add-on is running."
+    )
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as http:
         try:
-            user, session_token = await login(url, username, password, sess)
+            user, session_token = await login(url, username, password, http)
         except LoginFailed:
-            raise MALoginError(
+            raise LoginError(
                 "Music Assistant did not accept that username and password. If you only ever "
                 "open Music Assistant from the Home Assistant sidebar you may not have a Music "
-                "Assistant password yet: set one in Music Assistant (your user profile), or "
-                "use a long-lived token instead."
+                "Assistant password yet: set one in Music Assistant (your user profile)."
             ) from None
         except CannotConnect as e:
             if "403" in str(e):
-                raise MALoginError(
+                raise LoginError(
                     "Music Assistant is not set up yet. Open it once, finish the setup, then try "
                     "again."
                 ) from None
-            raise MALoginError(
-                f"Can't reach Music Assistant at {url}. Check the address and that the Music "
-                "Assistant add-on is running."
-            ) from None
+            raise LoginError(unreachable) from None
+        except (asyncio.TimeoutError, OSError):
+            raise LoginError(unreachable) from None
 
-        client = MusicAssistantClient(url, sess, token=session_token)
+        client = MusicAssistantClient(url, http, token=session_token)
         try:
-            await asyncio.wait_for(client.connect(), 15)
-            token = await client.auth.create_token(token_name)
+            await asyncio.wait_for(client.connect(), CONNECT_TIMEOUT_SECONDS)
             try:
-                # The login also created a 30-day session token we no longer need.
-                await client.auth.logout()
-            except Exception as e:
-                logger.debug(f"Could not end the temporary Music Assistant session: {e}")
+                token = await asyncio.wait_for(
+                    client.auth.create_token(TOKEN_NAME), CALL_TIMEOUT_SECONDS
+                )
+            finally:
+                # The login also created a 30-day session token that is no longer needed
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(client.auth.logout(), CALL_TIMEOUT_SECONDS)
         except InsufficientPermissions:
-            raise MALoginError(
+            raise LoginError(
                 "This Music Assistant user is a guest and can't create the long-lived login the "
                 "bridge needs. Use a regular user."
             ) from None
-        except (CannotConnect, asyncio.TimeoutError, OSError, MusicAssistantClientException):
-            raise MALoginError(
-                f"Can't reach Music Assistant at {url}. Check the address and that the Music "
-                "Assistant add-on is running."
-            ) from None
+        except (asyncio.TimeoutError, OSError, MusicAssistantClientException):
+            raise LoginError(unreachable) from None
         except MusicAssistantError as e:
-            raise MALoginError(f"Music Assistant could not create a login token ({e}).") from None
+            raise LoginError(f"Music Assistant could not create a login token ({e}).") from None
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 await client.disconnect()
-            except Exception:
-                pass
-        name = str(getattr(user, "display_name", "") or getattr(user, "username", "") or username)
-        logger.info(f"Created a long-lived Music Assistant token for user {name}")
-        return str(token), name
-    finally:
-        if own_session:
-            await sess.close()
-
-
-async def validate_token(
-    url: str, token: str, *, session: Optional[aiohttp.ClientSession] = None
-) -> tuple[str, str]:
-    """Check a pasted long-lived token by connecting once.
-
-    Returns:
-        (MA server version, the token's user name or "")
-
-    Raises:
-        MALoginError: with a plain-language message.
-    """
-    url = url.rstrip("/")
-    own_session = session is None
-    sess = session or aiohttp.ClientSession()
-    client = MusicAssistantClient(url, sess, token=token)
-    try:
-        await asyncio.wait_for(client.connect(), 15)
-        server_info = getattr(client, "server_info", None)
-        version = str(getattr(server_info, "server_version", "") or "")
-        name = ""
-        try:
-            user = await client.auth.get_current_user()
-            name = str(getattr(user, "display_name", "") or getattr(user, "username", "") or "")
-        except Exception as e:
-            logger.debug(f"Could not look up the token's Music Assistant user: {e}")
-        return version, name
-    except (AuthenticationFailed, AuthenticationRequired, InvalidToken):
-        raise MALoginError("Music Assistant did not accept that token.") from None
-    except InvalidServerVersion as e:
-        raise MALoginError(f"This Music Assistant version is not supported ({e}).") from None
-    except (CannotConnect, asyncio.TimeoutError, OSError, MusicAssistantClientException):
-        raise MALoginError(
-            f"Can't reach Music Assistant at {url}. Check the address and that the Music "
-            "Assistant add-on is running."
-        ) from None
-    finally:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
-        if own_session:
-            await sess.close()
+    name = user.display_name or user.username or username
+    logger.info(f"Created a long-lived Music Assistant token for user {name}")
+    return str(token), name

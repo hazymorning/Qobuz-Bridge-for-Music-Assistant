@@ -50,15 +50,13 @@ htmlcov/
 # Config files with secrets
 config.yaml
 .env
+data
 
 # Documentation and planning
 docs/
 planning/
 *.md
 !README.md
-
-# Claude
-.claude/
 
 # macOS
 .DS_Store

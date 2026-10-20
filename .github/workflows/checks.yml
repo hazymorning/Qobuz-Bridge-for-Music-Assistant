@@ -1,0 +1,39 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  code:
+    name: Lint, types and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.32"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run ruff format --check qobuz_proxy tests rootfs
+      - run: uv run ruff check qobuz_proxy tests rootfs
+      - run: uv run mypy qobuz_proxy rootfs/start.py
+      - run: uv run pytest -n auto
+
+  image:
+    name: Add-on image builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Both Dockerfiles are the same
+        run: cmp Dockerfile.amd64 Dockerfile.aarch64
+      - run: docker build --file Dockerfile.amd64 --tag addon .
+      - name: The image imports the app
+        run: >-
+          docker run --rm --entrypoint python3 addon -c
+          "import qobuz_proxy.backends.music_assistant.backend, qobuz_proxy.app"

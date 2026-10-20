@@ -31,11 +31,13 @@ from qobuz_proxy.config import (
     SpeakerConfig,
     _assign_ports,
     _generate_uuids,
+    _validate_speakers,
     parse_device_type,
     slugify_name,
 )
-from qobuz_proxy.backends.music_assistant.manager import MusicAssistantManager
-from qobuz_proxy.backends.music_assistant.settings import MASettingsStore
+from qobuz_proxy.auth.credentials import CACHE_DIR
+from qobuz_proxy.backends.base import AudioBackend
+from qobuz_proxy.backends.music_assistant.speakers import MusicAssistantSpeakers
 from qobuz_proxy.speaker import Speaker
 from qobuz_proxy.webui.config_writer import persist_speaker_uuids, save_config
 from qobuz_proxy.webui.routes import register_routes
@@ -65,6 +67,14 @@ def _configured_speaker_status(sc: SpeakerConfig, status: str) -> dict:
         "config": config_dict,
         "now_playing": None,
     }
+
+
+def _check_speaker(sc: SpeakerConfig) -> None:
+    """Refuse a speaker the next start would reject (ValueError -> HTTP 400)."""
+    try:
+        _validate_speakers([sc])
+    except ConfigError as e:
+        raise ValueError(str(e)) from e
 
 
 def _parse_body_device_type(value: Any) -> str:
@@ -133,14 +143,9 @@ class QobuzProxy:
         # slugified speaker name. Also keeps strong references to the tasks.
         self._speaker_retry_tasks: dict[str, asyncio.Task[None]] = {}
 
-        # Music Assistant players exposed as Qobuz Connect devices
-        self._ma_manager = MusicAssistantManager(
-            store=MASettingsStore(),
-            speaker_factory=self._make_ma_speaker,
-            reserved_ports=lambda: (
-                {self._config.server.http_port} | {s.http_port for s in self._config.speakers}
-            ),
-            yaml_speakers=lambda: self._config.speakers,
+        self._music_assistant = MusicAssistantSpeakers(
+            settings_path=CACHE_DIR / "music_assistant.json",
+            make_speaker=self._make_music_assistant_speaker,
             bind_address=self._config.server.bind_address,
         )
 
@@ -156,10 +161,7 @@ class QobuzProxy:
         await self._start_web_server()
 
         # Connect to Music Assistant early so the web UI can list its players
-        try:
-            await self._ma_manager.start()
-        except Exception as e:
-            logger.error(f"Music Assistant support failed to start: {e}", exc_info=True)
+        await self._music_assistant.start()
 
         # Persist identities before authentication or speaker startup, so an
         # offline renderer still keeps its UUID after a container recreation.
@@ -208,7 +210,7 @@ class QobuzProxy:
 
         self._is_running = False
         await self._cancel_auth_retry()
-        await self._ma_manager.stop()
+        await self._music_assistant.stop()
         await self._stop_speakers()
         await self._stop_web_server()
         logger.info("qobuz-proxy stopped")
@@ -290,7 +292,7 @@ class QobuzProxy:
         self._auth_state["email"] = email
         self._auth_state["authenticated"] = True
         await self._start_speakers()
-        await self._ma_manager.set_qobuz_ready(True)
+        await self._music_assistant.set_qobuz_logged_in(True)
 
     async def _validate_saved_token(
         self,
@@ -407,7 +409,7 @@ class QobuzProxy:
         if not self._speakers:
             await self._start_speakers()
         # Music Assistant devices pick up the new API client
-        await self._ma_manager.set_qobuz_ready(True, restart=True)
+        await self._music_assistant.set_qobuz_logged_in(True, restart=True)
 
         return True
 
@@ -416,7 +418,7 @@ class QobuzProxy:
         logger.info("Logout requested — stopping speakers and clearing token")
         await self._cancel_auth_retry()
         await self._stop_speakers()
-        await self._ma_manager.set_qobuz_ready(False)
+        await self._music_assistant.set_qobuz_logged_in(False)
 
         self._auth_state["authenticated"] = False
         self._auth_state["user_id"] = ""
@@ -469,12 +471,13 @@ class QobuzProxy:
         all_configs = list(self._config.speakers) + [sc]
         _assign_ports(all_configs, webui_port=self._config.server.http_port)
         _generate_uuids([sc])
+        _check_speaker(sc)
 
         # Persist first so a restart still has this speaker even if start fails.
         self._config.speakers.append(sc)
         self._save_config()
 
-        speaker = self._new_speaker(sc)
+        speaker = Speaker(config=sc, api_client=self._api_client, app_id=self._app_id)
         started = await speaker.start()
         if started:
             self._speakers.append(speaker)
@@ -538,8 +541,9 @@ class QobuzProxy:
             proxy_port=old_config.proxy_port,
             audio_device=body.get("audio_device", old_config.audio_device),
             audio_buffer_size=int(body.get("buffer_size", old_config.audio_buffer_size)),
-            ma_player_id=old_config.ma_player_id,
         )
+
+        _check_speaker(new_config)
 
         # Persist first: the edit is saved even if the restart below fails
         self._config.speakers[config_idx] = new_config
@@ -552,7 +556,7 @@ class QobuzProxy:
             await self._speakers[speaker_idx].stop()
 
         assert self._api_client is not None
-        new_speaker = self._new_speaker(new_config)
+        new_speaker = Speaker(config=new_config, api_client=self._api_client, app_id=self._app_id)
         started = await new_speaker.start()
         if speaker_idx is not None:
             self._speakers[speaker_idx] = new_speaker
@@ -626,27 +630,9 @@ class QobuzProxy:
                 result.append(_configured_speaker_status(sc, "disconnected"))
         return result
 
-    def _new_speaker(self, sc: SpeakerConfig) -> Speaker:
-        """Build a Speaker; music_assistant speakers get the shared MA connection."""
+    def _make_music_assistant_speaker(self, sc: SpeakerConfig, backend: AudioBackend) -> Speaker:
         assert self._api_client is not None
-        return Speaker(
-            config=sc,
-            api_client=self._api_client,
-            app_id=self._app_id,
-            ma_connection=(
-                self._ma_manager.connection if sc.backend_type == "music_assistant" else None
-            ),
-        )
-
-    def _make_ma_speaker(self, sc: SpeakerConfig, connection: Any) -> Speaker:
-        """Build the Speaker for one Music Assistant player."""
-        assert self._api_client is not None
-        return Speaker(
-            config=sc,
-            api_client=self._api_client,
-            app_id=self._app_id,
-            ma_connection=connection,
-        )
+        return Speaker(config=sc, api_client=self._api_client, app_id=self._app_id, backend=backend)
 
     # ------------------------------------------------------------------
     # Web server
@@ -667,7 +653,7 @@ class QobuzProxy:
         self._web_app["on_add_speaker"] = self._on_add_speaker
         self._web_app["on_edit_speaker"] = self._on_edit_speaker
         self._web_app["on_remove_speaker"] = self._on_remove_speaker
-        self._web_app["ma_manager"] = self._ma_manager
+        self._web_app["music_assistant"] = self._music_assistant
         self._web_app["local_audio_enabled"] = os.environ.get(
             "QOBUZPROXY_LOCAL_AUDIO_UI", ""
         ).lower() in ("true", "1", "yes")
@@ -715,7 +701,14 @@ class QobuzProxy:
         running_ids = {slugify_name(s.name) for s in self._speakers}
         configs = [sc for sc in self._config.speakers if slugify_name(sc.name) not in running_ids]
 
-        speakers = [self._new_speaker(sc) for sc in configs]
+        speakers = [
+            Speaker(
+                config=sc,
+                api_client=self._api_client,
+                app_id=self._app_id,
+            )
+            for sc in configs
+        ]
 
         tasks = [asyncio.ensure_future(s.start()) for s in speakers]
         try:
@@ -787,7 +780,7 @@ class QobuzProxy:
                 if self._api_client is None:
                     return  # Logged out — speakers restart on the next login
 
-                speaker = self._new_speaker(config)
+                speaker = Speaker(config=config, api_client=self._api_client, app_id=self._app_id)
                 try:
                     started = await speaker.start()
                 except asyncio.CancelledError:

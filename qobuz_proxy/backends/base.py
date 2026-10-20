@@ -6,7 +6,7 @@ Defines the contract that all audio backends must implement.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional, Protocol, runtime_checkable
 
 from .types import (
     BackendInfo,
@@ -318,30 +318,18 @@ class AudioBackend(ABC):
         )
 
 
-class ExternalPlaybackAware(ABC):
-    """Mixin for backends that can tell when another source takes over their device.
+@runtime_checkable
+class ExternalPlaybackAware(Protocol):
+    """A backend that can tell when another source takes over its device.
 
-    The speaker wires these hooks so the proxy leaves the Qobuz session instead of
-    fighting the other source, and only takes the device back on a new selection
-    in the Qobuz app.
+    The speaker then leaves the Qobuz session instead of fighting the other
+    source, and only takes the device back on a new selection in the app.
     """
 
-    @abstractmethod
-    def on_external_playback(self, callback: Callable[[], Awaitable[None]]) -> None:
-        """Register the async callback run when another source takes over."""
-        ...
+    def on_external_playback(self, callback: Callable[[], Awaitable[None]]) -> None: ...
 
-    @abstractmethod
-    def prepare_for_selection(self) -> None:
-        """Forget a takeover before the Qobuz app selects this device again."""
-        ...
+    def prepare_for_selection(self) -> None: ...
 
-    @abstractmethod
-    async def check_external_playback(self) -> bool:
-        """Re-check ownership now; True if another source owns the device."""
-        ...
+    async def check_external_playback(self) -> bool: ...
 
-    @abstractmethod
-    async def can_apply_remote_state(self) -> bool:
-        """Whether a SET_STATE snapshot from the Qobuz app may be applied now."""
-        ...
+    async def can_apply_remote_state(self) -> bool: ...
