@@ -95,6 +95,9 @@ EXPECT_STATE_SECONDS = 10.0
 # Coalesce volume changes made in MA; ignore MA's echoes this long after we set one.
 VOLUME_DEBOUNCE_SECONDS = 0.3
 VOLUME_SETTLE_SECONDS = 1.5
+# MA answers an unpause once the player confirmed it (or after 5 s without), and reports the
+# player's new state up to 0.25 s after answering.
+UNPAUSE_CONFIRM_SECONDS = 1.0
 # Starting at or below this position is a normal start, not a positioned one.
 POSITIONED_START_MIN_MS = 2_000
 # MA can take a while to resolve, buffer and start a track on a player or group.
@@ -177,6 +180,8 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         self._last_stop_at: Optional[float] = None
         self._queue_state: Optional[MusicAssistantState] = None
         self._is_paused = False
+        self._resume_at_ms: Optional[int] = None  # a seek made while paused, for resume()
+        self._restarts_on_resume = False  # the player stayed paused when MA unpaused it
         self._has_reported_end = False
         self._position_ms = 0
         self._position_at = 0.0  # time.monotonic() of the last position update
@@ -494,24 +499,47 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
             and queue.current_item is not None
             and queue.current_item.queue_item_id == current.item_id
         ):
-            # MA's queue state lags the player by ~0.5 s: right after our own pause
-            # (e.g. the re-pause after a seek) the queue still says playing
-            player = self._connection.player(queue_id)
-            player_paused = (
-                player is not None and player.playback_state == MusicAssistantState.PAUSED
-            )
-            if queue.state == MusicAssistantState.PLAYING and not player_paused:
+            # MA's queue state lags the player by ~0.5 s: right after our own pause the
+            # queue still says playing
+            player_paused = self._player_state() == MusicAssistantState.PAUSED
+            resume_at = self._resume_at_ms
+            if (
+                resume_at is None
+                and queue.state == MusicAssistantState.PLAYING
+                and not player_paused
+            ):
                 self._resumed()
                 return True
             if queue.state in _PLAYING_OR_PAUSED or (
                 queue.state == MusicAssistantState.IDLE and not queue.ended
             ):
+                # MA unpauses a paused queue on the player itself; anything else starts
+                # MA's stream again
+                unpauses = queue.state == MusicAssistantState.PAUSED
+                if unpauses and self._restarts_on_resume and resume_at is None:
+                    resume_at = self._live_position_ms()
                 self._writes_in_flight += 1
                 try:
-                    await self._connection.call(
-                        f"player_queues/play queue={queue_id}",
-                        lambda c: c.player_queues.play(queue_id),
-                    )
+                    if resume_at is None:
+                        await self._connection.call(
+                            f"player_queues/play queue={queue_id}",
+                            lambda c: c.player_queues.play(queue_id),
+                        )
+                        if unpauses and not await self._player_reaches(
+                            MusicAssistantState.PLAYING, UNPAUSE_CONFIRM_SECONDS
+                        ):
+                            # MA waited for it in vain (a WiiM does not take up its paused
+                            # stream again): start the track again where it was paused
+                            resume_at = self._live_position_ms()
+                            self._restarts_on_resume = True
+                            logger.info(
+                                "[%s] The player did not play again after the pause; "
+                                "restarting the track at %s (and after every pause from now on)",
+                                self.name,
+                                _format_ms(resume_at),
+                            )
+                    if resume_at is not None:
+                        await self._seek_music_assistant(resume_at)
                 except (NotConnectedError, MusicAssistantError):
                     return False
                 finally:
@@ -524,9 +552,8 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         # Our item is gone or finished (e.g. MA cleared it): start it again where we were
         if self._current_meta is None:
             return False
-        meta = BackendTrackMetadata(
-            **{**asdict(self._current_meta), "start_position_ms": self._position_ms}
-        )
+        start_ms = self._resume_at_ms if self._resume_at_ms is not None else self._position_ms
+        meta = BackendTrackMetadata(**{**asdict(self._current_meta), "start_position_ms": start_ms})
         self._current = None
         try:
             await self.play("", meta)
@@ -537,6 +564,7 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
 
     def _resumed(self) -> None:
         self._is_paused = False
+        self._resume_at_ms = None
         self._is_attached = True
         self._queue_state = MusicAssistantState.PLAYING
         self._play_started_at = time.monotonic()
@@ -549,6 +577,7 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         armed = self._armed
         self._is_attached = False
         self._is_paused = False
+        self._resume_at_ms = None
         if next_track_id is not None and armed is not None and armed.track_id == next_track_id:
             # play() is about to jump straight to the item MA already has queued.
             # If it doesn't come (load superseded, skip while paused), stop then.
@@ -603,6 +632,16 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
                 _format_ms(live),
             )
             return
+        if self._is_paused and self._current is not None:
+            # MA seeks by starting the stream again, which plays (a player still loading it
+            # can miss a pause sent after it): resume() starts the track there instead
+            moved = abs(position_ms - live) > SEEK_TOLERANCE_MS
+            self._resume_at_ms = position_ms if moved else None
+            if moved:
+                logger.info(
+                    "[%s] Qobuz app: seek to %s while paused", self.name, _format_ms(position_ms)
+                )
+            return
         if (
             self._last_seek_target is not None
             and now - self._last_seek_at < SEEK_ECHO_SECONDS
@@ -615,26 +654,23 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
             raise NotConnectedError("Music Assistant is not connected")
         if not self._queue_plays_ours():
             raise RuntimeError("Cannot seek: Music Assistant is not playing this Qobuz track")
-        queue_id = self._player_id
-        seconds = int(round(position_ms / 1000))
-        was_paused = self._is_paused
         self._cancel_timer("idle")
         self._writes_in_flight += 1
         try:
-            await self._connection.call(
-                f"player_queues/seek queue={queue_id} position={seconds}s",
-                lambda c: c.player_queues.seek(queue_id, seconds),
-                timeout=PLAY_TIMEOUT_SECONDS,
-            )
-            if was_paused:
-                # MA starts playing when a paused queue seeks; keep it paused
-                await self._connection.call(
-                    f"player_queues/pause queue={queue_id} (stay paused after seek)",
-                    lambda c: c.player_queues.pause(queue_id),
-                )
+            await self._seek_music_assistant(position_ms)
         finally:
             self._writes_in_flight -= 1
-        self._expect(MusicAssistantState.PAUSED if was_paused else MusicAssistantState.PLAYING)
+        self._expect(MusicAssistantState.PLAYING)
+
+    async def _seek_music_assistant(self, position_ms: int) -> None:
+        """Start MA's stream again at ``position_ms`` (MA plays from there)."""
+        queue_id = self._player_id
+        seconds = int(round(position_ms / 1000))
+        await self._connection.call(
+            f"player_queues/seek queue={queue_id} position={seconds}s",
+            lambda c: c.player_queues.seek(queue_id, seconds),
+            timeout=PLAY_TIMEOUT_SECONDS,
+        )
         # MA restarts the stream to seek; don't read that as a stop
         self._play_started_at = time.monotonic()
         self._last_seek_target = position_ms
@@ -1100,6 +1136,7 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
             if self._is_paused:
                 logger.info("[%s] Music Assistant: playing again", self.name)
             self._is_paused = False
+            self._resume_at_ms = None
             self._cancel_timer("idle")
             # Playing again after an MA action (e.g. a seek): a later idle is not its doing
             self._last_play_action_at = 0.0
@@ -1189,6 +1226,7 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         self._stall_since = None
         self._has_reported_end = False
         self._is_paused = queue.state == MusicAssistantState.PAUSED
+        self._resume_at_ms = None
         self._play_started_at = time.monotonic()
         self._queue_state = MusicAssistantState.PLAYING
         self._cancel_timer("idle")
@@ -1303,6 +1341,7 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
         self._has_played = False
         self._has_reported_end = False
         self._is_paused = False
+        self._resume_at_ms = None
         self._has_external_playback = False
         self._stall_since = None
         self._left_item_id = None
@@ -1339,6 +1378,19 @@ class MusicAssistantBackend(AudioBackend, ExternalPlaybackAware):
             lambda c: c.player_queues.get_queue_items(queue_id, limit=20, offset=offset),
         )
         return any(item.queue_item_id == item_id for item in items)
+
+    def _player_state(self) -> Optional[MusicAssistantState]:
+        player = self._connection.player(self._player_id)
+        return player.playback_state if player is not None else None
+
+    async def _player_reaches(self, state: MusicAssistantState, timeout: float) -> bool:
+        """Whether MA reports the player in ``state`` within ``timeout`` seconds."""
+        deadline = time.monotonic() + timeout
+        while self._player_state() != state:
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.05)
+        return True
 
     def _our_queue(self) -> Optional[PlayerQueue]:
         """MA's queue, but only while its current item is our current track."""

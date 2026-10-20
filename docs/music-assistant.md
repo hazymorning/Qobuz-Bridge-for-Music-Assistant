@@ -80,6 +80,8 @@ Keep these when changing the backend:
 | next track known | `play_media` `replace_next` once MA really plays the current track (gapless) |
 | next (already queued) | `play_index` on the queued item |
 | pause / resume / stop / seek | `pause` / `play` / `stop` / `seek` (stop only while MA still plays our item) |
+| resume, and the player stays paused (a WiiM) | `seek` to where it paused, which starts MA's stream again; from then on every resume on that speaker does this right away |
+| seek while paused | nothing yet (MA would start playing to seek); resume then does a `seek` to that spot |
 | volume | `players/cmd/group_volume` (MA applies it as a plain volume set on a single player) |
 | next track changed | `delete_item`; an item the player already buffered is marked stale and stepped past |
 | first play after a selection | repeat and autoplay turned off on that queue |

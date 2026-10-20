@@ -46,6 +46,7 @@ def fast_timers(monkeypatch: pytest.MonkeyPatch) -> None:
         "EXPECT_STATE_SECONDS": 0.5,
         "PROMOTE_SETTLE_SECONDS": 0.1,
         "STALL_CONFIRM_SECONDS": 0.1,
+        "UNPAUSE_CONFIRM_SECONDS": 0.1,
     }.items():
         monkeypatch.setattr(backend_module, name, value)
     monkeypatch.setattr(connection_module, "RECONNECT_DELAYS_SECONDS", (0.02,))

@@ -139,18 +139,52 @@ async def test_a_seek_in_the_app_reaches_music_assistant_once_even_if_the_app_re
     assert rig.app_position() == pytest.approx(90_000, abs=1_500)
 
 
-async def test_after_a_pause_in_music_assistant_a_seek_from_the_app_leaves_it_paused(rig):
+async def test_a_seek_while_paused_stays_paused_and_play_starts_the_track_there(rig):
     await rig.play_album(0)
     await rig.wait_armed("102")
     rig.server.ui_pause(KITCHEN)
     await rig.wait_for(lambda: rig.app() == (APP_PAUSED, 1), "app shows paused")
+    rig.server.clear_logs()
 
     await rig.deliver(album_state(0, APP_PAUSED, pos=90_000))
     await rig.idle(0.3)
-
     assert rig.queue_state() == MusicAssistantState.PAUSED
-    assert rig.queue_position() == pytest.approx(90, abs=1)
     assert rig.app() == (APP_PAUSED, 1)
+    assert rig.app_position() == pytest.approx(90_000, abs=1_500)
+
+    await rig.deliver(album_state(0, APP_PLAYING, pos=90_000))
+    await rig.wait_for(lambda: rig.app() == (APP_PLAYING, 1), "app shows playing")
+
+    assert rig.writes() == ["player_queues/seek"]  # one stream start, at the new spot
+    assert rig.queue_state() == MusicAssistantState.PLAYING
+    assert rig.queue_position() == pytest.approx(90, abs=1)
+
+
+async def test_a_speaker_that_stays_paused_when_unpaused_plays_again_from_where_it_paused(rig):
+    rig.server.no_unpause_player_ids.add(KITCHEN)
+    await rig.play_album(0)
+    await rig.wait_armed("102")
+    rig.server.advance_time(KITCHEN, 30)
+    await rig.deliver(album_state(0, APP_PAUSED, pos=30_000))
+    await rig.wait_for(lambda: rig.queue_state() == MusicAssistantState.PAUSED, "paused")
+    rig.server.clear_logs()
+
+    await rig.deliver(album_state(0, APP_PLAYING, pos=30_000))
+    await rig.wait_for(lambda: rig.app() == (APP_PLAYING, 1), "app shows playing")
+    assert rig.writes() == ["player_queues/play", "player_queues/seek"]
+    assert rig.queue_state() == MusicAssistantState.PLAYING
+    assert rig.queue_position() == pytest.approx(30, abs=1)
+
+    # From then on a resume starts the track again straight away
+    rig.server.advance_time(KITCHEN, 10)
+    await rig.deliver(album_state(0, APP_PAUSED, pos=40_000))
+    await rig.wait_for(lambda: rig.queue_state() == MusicAssistantState.PAUSED, "paused again")
+    rig.server.clear_logs()
+    await rig.deliver(album_state(0, APP_PLAYING, pos=40_000))
+    await rig.wait_for(lambda: rig.app() == (APP_PLAYING, 1), "app shows playing again")
+    assert rig.writes() == ["player_queues/seek"]
+    assert rig.queue_state() == MusicAssistantState.PLAYING
+    assert rig.queue_position() == pytest.approx(40, abs=1)
 
 
 async def test_volume_from_the_app_reaches_music_assistant_and_the_latest_of_a_burst_wins(
