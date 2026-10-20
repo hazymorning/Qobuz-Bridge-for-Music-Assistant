@@ -182,6 +182,9 @@ async def test_every_visible_player_group_and_stereo_pair_appears_in_the_app_und
     ]
     assert all(p["available"] for p in rows)
 
+    server.update_player("pair", available=False)  # powered off: the panel marks it offline
+    await add_on.wait_for(lambda: not panel_row(music_assistant, "pair")["available"], "offline")
+
 
 async def test_ticked_players_are_the_only_ones_in_the_app_and_stay_ticked(add_on):
     music_assistant = await add_on.start()
@@ -314,10 +317,10 @@ async def test_a_speaker_that_fails_to_start_is_retried_and_never_doubled(
     server, add_on, monkeypatch
 ):
     monkeypatch.setattr(speakers_module, "START_RETRY_DELAYS_SECONDS", (0.5, 0.05))
-    add_on.failing_starts["up1"] = 2  # e.g. its port is still taken
+    add_on.failing_starts.update(up1=2, pair=1)  # e.g. its port is still taken
     music_assistant = await add_on.start()
-    await add_on.wait_until_listed({"group", "pair"})
-    assert music_assistant.status()["speaker_count"] == 2  # the panel counts running ones
+    await add_on.wait_until_listed({"group"})
+    assert music_assistant.status()["speaker_count"] == 1  # the panel counts running ones
 
     # Music Assistant events while the retry waits must not start a second Kitchen
     for level in (11, 12, 13):
@@ -326,9 +329,12 @@ async def test_a_speaker_that_fails_to_start_is_retried_and_never_doubled(
     await music_assistant.update_speakers()
     assert add_on.starts.count("up1") == 1
 
-    await add_on.wait_until_listed(EXPOSED)
+    # The pair is unticked while its retry waits: it must not turn up in the app later
+    await music_assistant.set_exposed_players(expose_all=False, selected=["up1", "group"])
+    await add_on.wait_until_listed({"up1", "group"})
     await add_on.idle(0.2)
     assert add_on.starts.count("up1") == 3  # two failures, then it runs
+    assert add_on.starts.count("pair") == 1
 
 
 async def test_connecting_saves_a_new_token_and_disconnecting_forgets_it(server, add_on):
@@ -362,6 +368,11 @@ async def test_connecting_saves_a_new_token_and_disconnecting_forgets_it(server,
     assert (saved.expose_all, saved.selected_player_ids) == (False, ["group"])
     assert add_on.listed() == {}
     assert music_assistant.status()["is_configured"] is False
+
+    # Connecting again, with every player already known: the new token is saved too
+    await music_assistant.connect(server.url, "admin", "admin-password")
+    assert add_on.saved().token in server.valid_tokens
+    assert add_on.listed() == {"group": "Downstairs (MA)"}
 
 
 async def test_login_problems_come_back_as_plain_messages_and_save_nothing(server, add_on):

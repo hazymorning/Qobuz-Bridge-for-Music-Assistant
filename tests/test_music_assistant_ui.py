@@ -128,6 +128,11 @@ async def test_clearing_the_queue_in_music_assistant_shows_stopped(rig):
 
 async def test_the_last_track_played_to_its_end_shows_the_album_finished(rig):
     await rig.play_album(2)
+    # Paused and resumed in Music Assistant on the way
+    rig.server.ui_pause(PID)
+    await rig.wait_for(lambda: rig.app() == (APP_PAUSED, 3), "app shows paused")
+    rig.server.ui_resume(PID)
+    await rig.wait_for(lambda: rig.app() == (APP_PLAYING, 3), "app shows playing")
     await rig.finish_track()
 
     # Not "stopped on track 3": the app's queue is done
@@ -152,14 +157,17 @@ async def test_short_idle_flaps_never_stop_the_track(rig):
 
 
 async def test_a_player_that_never_starts_shows_stopped_instead_of_skipping_the_album(rig):
-    rig.server.dead_player_ids.add(PID)
+    await rig.play_album(0)
+    await rig.wait_armed("102")
+    rig.server.dead_player_ids.add(PID)  # track 1 played, then the speaker stopped responding
+    rig.server.clear_logs()
 
-    await rig.deliver(album_state(0))
-    await rig.wait_for(lambda: rig.app() == (APP_STOPPED, 1), "app shows stopped")
+    await rig.deliver(album_state(1))  # next in the app
+    await rig.wait_for(lambda: rig.app() == (APP_STOPPED, 2), "app shows stopped")
     await rig.idle(0.2)
 
-    assert rig.app() == (APP_STOPPED, 1)
-    assert rig.plays() == [("replace", [uri("101")])]
+    assert rig.app() == (APP_STOPPED, 2)
+    assert rig.writes() == ["player_queues/play_index"]  # tried once, nothing skipped to
     assert ACTION_NEXT not in rig.cloud.actions
 
 

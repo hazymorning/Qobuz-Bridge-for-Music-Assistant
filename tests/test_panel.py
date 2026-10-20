@@ -2,8 +2,10 @@
 player choice, request validation, and the guard against other sites.
 """
 
+import asyncio
 import json
 import re
+import socket
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -66,7 +68,10 @@ class Panel:
         self.client = TestClient(TestServer(app))
 
     async def _on_logout(self) -> None:
+        """What the add-on does when the user logs out of Qobuz."""
         self.logouts += 1
+        self.auth_state.update(authenticated=False, email="")
+        await self.music_assistant.set_qobuz_logged_in(False)
 
     async def log_in_to_qobuz(self) -> None:
         """What the add-on does after a restart with a saved Qobuz login (no display name)."""
@@ -111,6 +116,11 @@ def detail(status: dict[str, Any], check_id: str) -> str:
     return str(next(check["detail"] for check in status["checks"] if check["id"] == check_id))
 
 
+def shown(status: dict[str, Any]) -> dict[str, str]:
+    """The players in the Qobuz app, with the names they show there."""
+    return {p["player_id"]: p["speaker_name"] for p in status["players"] if p["speaker_name"]}
+
+
 @pytest.fixture
 async def panel(
     server: FakeMusicAssistantServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_login
@@ -144,16 +154,29 @@ async def test_the_page_loads_its_assets_and_has_every_element_its_script_uses(p
     assert [i for i in sorted(ids) if f'id="{i}"' not in page] == []
 
 
-async def test_the_script_only_uses_relative_urls_so_it_works_behind_ingress(panel):
+async def test_the_script_calls_routes_that_exist_as_json_and_by_relative_urls(panel):
     headers = {"X-Ingress-Path": "/api/hassio_ingress/abc123"}
     page = await (await panel.client.get("/", headers=headers)).text()
     assert '<base href="/api/hassio_ingress/abc123/">' in page
 
     script = await (await panel.client.get("/static/panel.js")).text()
-    urls = re.findall(r'(?:request|send)\("[A-Z]+", "([^"]+)"', script)
-    assert urls and all(url.startswith("api/") for url in urls), urls
-    # A path from the root would step out of the ingress prefix
-    assert not re.search(r"""["'`]/api/""", script)
+    calls = re.findall(r'(?:request|send)\("([A-Z]+)", "([^"]+)"', script)
+    assert calls and all(url.startswith("api/") for _, url in calls), calls
+    # A path from the root would step out of the ingress prefix (one added to the
+    # add-on's own address, for the framed Qobuz login, is fine)
+    assert re.findall(r"""(?<!\+ )["'`]/\w[^"'`]*""", script) == []
+    # The guard takes changes only as JSON
+    assert re.search(r'headers\["Content-Type"\] = "application/json"', script)
+
+    for method, url in calls:
+        response = await panel.client.request(method, f"/{url}", json={})
+        assert response.status not in (404, 405), (method, url)
+
+
+def test_the_qobuz_login_link_uses_an_address_of_this_machine():
+    address = music_assistant_routes._lan_ip()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.bind((address, 0))  # refused for an address that is not this machine's
 
 
 async def test_the_checks_lead_the_user_through_setup_in_order(panel, server):
@@ -170,7 +193,15 @@ async def test_the_checks_lead_the_user_through_setup_in_order(panel, server):
     assert detail(status, "qobuz") == "Logged in to Qobuz as alice@example.com."
     assert "Enter your Music Assistant username and password" in detail(status, "music_assistant")
 
-    status = await panel.connect()
+    # While Music Assistant is still sending its players, the check waits rather than alarms
+    server.gate("players/all")
+    connecting = asyncio.create_task(panel.connect())
+    await wait_for(lambda: server.calls("players/all"), "the connection to load the players")
+    status = await panel.status()
+    assert levels(status) == "qobuz:ok music_assistant:pending speakers:pending"
+    server.release("players/all")
+
+    status = await connecting
     assert levels(status) == "qobuz:ok music_assistant:ok qobuz_in_music_assistant:ok speakers:ok"
     version = server.server_version
     assert detail(status, "music_assistant") == f"Connected to Music Assistant {version}."
@@ -179,6 +210,12 @@ async def test_the_checks_lead_the_user_through_setup_in_order(panel, server):
     status = await panel.choose_players(expose_all=False)  # and nothing ticked
     assert levels(status).endswith(" speakers:warn")
     assert "No speakers are shared with the Qobuz app" in detail(status, "speakers")
+
+    # Logged out of Qobuz, the speakers row points back at the Qobuz login
+    await ok(await panel.client.post("/api/auth/logout", json={}))
+    status = await panel.status()
+    assert levels(status).endswith(" speakers:pending")
+    assert "once Qobuz and Music Assistant are both connected" in detail(status, "speakers")
 
 
 async def test_the_checks_say_what_to_fix_in_music_assistant(panel, server):
@@ -235,11 +272,16 @@ async def test_a_partial_player_choice_is_applied_saved_and_keeps_the_other_sett
 
     # Switching "all" off then leaves just the ticked player in the Qobuz app
     status = await panel.choose_players(expose_all=False)
-    shown = {p["player_id"]: p["speaker_name"] for p in status["players"] if p["speaker_name"]}
-    assert shown == {"up2": "Living Room (MA)"}
+    assert shown(status) == {"up2": "Living Room (MA)"}
+    assert status["speaker_count"] == 1
+
+    # From then on a tick swaps the speaker, and "all" stays off
+    status = await panel.choose_players(selected=["up1"])
+    assert status["expose_all"] is False
+    assert shown(status) == {"up1": "Kitchen (MA)"}
     assert status["speaker_count"] == 1
     saved = panel.saved()
-    assert (saved.expose_all, saved.selected_player_ids) == (False, ["up2"])
+    assert (saved.expose_all, saved.selected_player_ids) == (False, ["up1"])
 
 
 async def test_malformed_requests_are_refused_and_change_nothing(panel, server):

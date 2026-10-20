@@ -274,7 +274,7 @@ async def test_a_refused_connection_is_retried_but_a_revoked_token_stops_the_ret
 
 
 @pytest.mark.usefixtures("fake_login")
-async def test_logging_in_at_a_new_address_reconnects_there_with_a_long_lived_token(
+async def test_a_login_at_a_new_address_reconnects_there_and_disconnecting_forgets_the_token(
     connection, server
 ):
     await _connect(connection, server)
@@ -292,6 +292,13 @@ async def test_logging_in_at_a_new_address_reconnects_there_with_a_long_lived_to
     assert [(client.server_url, client.connection.auth_token) for client in server.clients] == [
         (new_address, token)
     ]
+
+    # Disconnect in the panel keeps the address but drops the token
+    attempts = len(server.created_clients)
+    await connection.reconnect(new_address, "")
+    await server.settle()
+    assert connection.status.state == ConnectionState.NOT_CONFIGURED
+    assert not connection.is_connected and len(server.created_clients) == attempts
 
 
 @pytest.mark.usefixtures("fake_login")

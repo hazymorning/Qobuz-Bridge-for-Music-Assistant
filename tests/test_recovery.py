@@ -7,7 +7,7 @@ from music_assistant_models.enums import PlaybackState as MusicAssistantState
 
 from qobuz_proxy.backends.music_assistant import settings
 from qobuz_proxy.backends.music_assistant.connection import ConnectionState
-from tests.fake_qobuz import APP_PAUSED, APP_PLAYING, APP_STOPPED, album_state, uri
+from tests.fake_qobuz import APP_PAUSED, APP_PLAYING, APP_STOPPED, album_state, set_volume, uri
 from tests.rig import PID, Rig, assert_no_backend_errors
 
 
@@ -85,7 +85,12 @@ async def test_an_outage_longer_than_the_grace_shows_stopped_and_play_works_once
     await rig.wait_armed("102")
 
     server.set_reachable(False, drop=True)
+    await rig.wait_for(lambda: not rig.conn.is_connected, "connection lost")
+    await rig.deliver(album_state(0, APP_PAUSED))  # cannot reach Music Assistant, which plays on
+    await rig.deliver(set_volume(35))  # not applied either, but taken without an error
+    await rig.wait_for(lambda: rig.cloud.volumes[-1] == 35, "app shows 35%")
     await rig.wait_for(lambda: rig.app() == (APP_STOPPED, 1), "app shows stopped")
+    assert APP_PAUSED not in rig.shown_states()
     assert not rig.conn.is_connected
 
     server.set_reachable(True)
@@ -102,7 +107,7 @@ async def test_paused_music_stays_paused_through_an_outage(server, rig):
     await rig.wait_for(lambda: rig.queue_state() == MusicAssistantState.PAUSED, "paused")
 
     server.set_reachable(False, drop=True)
-    await rig.idle(0.4)  # longer than the grace
+    await rig.idle(2.0)  # longer than the grace and the player's three 0.5 s checks for a stop
     assert rig.app() == (APP_PAUSED, 1)
 
     server.set_reachable(True)
@@ -191,6 +196,14 @@ async def test_after_an_add_on_restart_play_in_the_app_continues_what_music_assi
     assert server.writes == []  # no stop, restart, seek back or second copy of the next track
     assert server.item_ids(PID) == items
     assert server.queue(PID).corrected_elapsed_time >= 60
+
+    # Stop and play in the app start the track again, even if Music Assistant (lagging behind)
+    # still plays it right after the stop
+    await restarted.deliver(album_state(0, APP_STOPPED))
+    server.ui_resume(PID)
+    await server.settle()
+    await restarted.play_album(0)
+    assert restarted.plays() == [("replace", [uri("101")])]  # not continued
 
 
 async def test_after_an_add_on_restart_play_resumes_the_track_paused_in_music_assistant(

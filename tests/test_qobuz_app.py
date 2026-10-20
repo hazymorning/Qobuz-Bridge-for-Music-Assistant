@@ -8,6 +8,7 @@ import pytest
 from music_assistant_models.enums import PlaybackState as MusicAssistantState
 from music_assistant_models.enums import PlayerType, QueueOption, RepeatMode
 
+from qobuz_proxy.backends.music_assistant import backend as backend_module
 from qobuz_proxy.connect.types import ConnectTokens, JWTConnectToken
 from tests.fake_qobuz import (
     ACTION_NEXT,
@@ -75,6 +76,12 @@ async def test_album_plays_to_the_end_once_in_order_and_then_music_assistant_is_
     assert not server.queue(PID).autoplay_enabled
     assert rig.queue_state() == MusicAssistantState.IDLE
 
+    # Turned back on in Music Assistant, repeat is off again once the speaker is picked again
+    server.queue(PID).repeat_mode = RepeatMode.ALL
+    await rig.select()
+    await rig.play_album(0)
+    assert server.queue(PID).repeat_mode == RepeatMode.OFF
+
 
 async def test_pause_and_resume_in_the_app_pause_music_assistant_and_resume_it_where_it_was(rig):
     await rig.play_album(0)
@@ -96,6 +103,22 @@ async def test_pause_and_resume_in_the_app_pause_music_assistant_and_resume_it_w
     assert rig.server.queue(PID).corrected_elapsed_time == pytest.approx(30, abs=1)
 
 
+async def test_another_track_picked_while_paused_stops_music_assistant_at_once(rig, monkeypatch):
+    monkeypatch.setattr(backend_module, "JUMP_WAIT_SECONDS", 3.0)  # as in production
+    await rig.play_album(0)
+    await rig.wait_armed("102")
+    await rig.deliver(album_state(0, APP_PAUSED))
+    await rig.wait_for(lambda: rig.queue_state() == MusicAssistantState.PAUSED, "paused")
+
+    await rig.deliver(album_state(2, APP_PAUSED))  # the user picks track 3, still paused
+    assert rig.queue_state() == MusicAssistantState.IDLE
+
+    await rig.deliver(album_state(2, APP_PLAYING))
+    await rig.wait_for(
+        lambda: rig.queue_track() == "103" and rig.app() == (APP_PLAYING, 3), "track 3"
+    )
+
+
 async def test_a_seek_in_the_app_reaches_music_assistant_once_even_if_the_app_repeats_it(rig):
     await rig.play_album(0)
     await rig.wait_armed("102")
@@ -113,7 +136,10 @@ async def test_a_seek_in_the_app_reaches_music_assistant_once_even_if_the_app_re
     assert rig.app_position() == pytest.approx(90_000, abs=1_500)
 
 
-async def test_volume_from_the_app_reaches_music_assistant_and_the_latest_of_a_burst_wins(rig):
+async def test_volume_from_the_app_reaches_music_assistant_and_the_latest_of_a_burst_wins(
+    rig, monkeypatch
+):
+    monkeypatch.setattr(backend_module, "VOLUME_SETTLE_SECONDS", 1.5)  # as in production
     await rig.deliver(set_volume(10), set_volume(20), set_volume(30), set_volume(35))
     await rig.wait_for(lambda: rig.cloud.volumes[-1] == 35, "app shows 35%")
 
@@ -121,6 +147,12 @@ async def test_volume_from_the_app_reaches_music_assistant_and_the_latest_of_a_b
     assert calls[-1] == {"player_id": PID, "volume_level": 35}
     assert len(calls) < 4
     assert rig.server.players[PID].volume_level == 35
+
+    # Music Assistant reports a step of the burst late: the app's slider does not jump back
+    shown = len(rig.cloud.volumes)
+    rig.server.set_player_volume(PID, 20)
+    await rig.idle(0.1)
+    assert rig.cloud.volumes[shown:] == []
 
 
 async def test_next_in_the_app_jumps_to_the_track_already_queued_and_previous_goes_back(rig):
@@ -181,6 +213,19 @@ async def test_a_next_track_removed_in_the_app_is_skipped(rig, buffered):
     assert rig.app() == (APP_PLAYING, 3)
     assert rig.queue_track() == "103"
     assert _shown_queue_items(rig) == [1, 3]
+
+
+async def test_the_last_track_removed_in_the_app_after_the_speaker_buffered_it_ends_the_album(rig):
+    await rig.play_album(1)
+    await rig.wait_armed("103")
+    rig.server.buffer_next(PID)
+
+    await rig.deliver(set_state())  # the user removes track 3, the last one, in the app
+    await rig.finish_track()
+
+    # Not "stopped on track 2": Music Assistant stops at track 3 and the app's queue is done
+    await rig.wait_for(lambda: rig.app() == (APP_STOPPED, 0), "app shows the album finished")
+    assert rig.queue_state() == MusicAssistantState.IDLE
 
 
 async def test_tracks_added_in_music_assistant_are_left_alone_and_play_after_the_current_one(rig):

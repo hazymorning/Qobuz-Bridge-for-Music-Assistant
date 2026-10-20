@@ -1,4 +1,4 @@
-"""What this repo changes inside upstream QobuzProxy files (speaker.py, playback/player.py, app.py).
+"""What this repo changes inside upstream QobuzProxy files (speaker.py, player.py, app.py, base.py).
 
 Run these after merging upstream: each one fails if the merge lost one of those changes.
 """
@@ -126,17 +126,15 @@ async def test_music_assistant_streams_the_track_itself_so_the_add_on_never_rest
 
 
 class Renderer(AudioBackend):
-    """A device whose state the test sets, counting how often the player polls it."""
+    """A device whose state the test sets, counting how often the player polls it.
 
-    def __init__(self, reports_external_resume: bool) -> None:
+    Like DLNA and local speakers, it keeps AudioBackend's answer on resumes done elsewhere.
+    """
+
+    def __init__(self) -> None:
         super().__init__(name="renderer")
-        self._reports_external_resume = reports_external_resume
         self.state = PlaybackState.STOPPED
         self.polls = 0
-
-    @property
-    def reports_external_resume(self) -> bool:
-        return self._reports_external_resume
 
     async def get_state(self) -> PlaybackState:
         self.polls += 1
@@ -172,6 +170,14 @@ class Renderer(AudioBackend):
     async def disconnect(self) -> None: ...
 
 
+class MusicAssistantRenderer(Renderer):
+    """A device another controller can resume, as Music Assistant's own UI can."""
+
+    @property
+    def reports_external_resume(self) -> bool:
+        return True
+
+
 @pytest.fixture
 def fast_polls(monkeypatch: pytest.MonkeyPatch) -> None:
     """No sleep lasts over 1 ms, so the player polls its device that often instead of every 0.5 s."""
@@ -198,8 +204,8 @@ async def _paused_player(renderer: Renderer) -> AsyncIterator[QobuzPlayer]:
 async def test_a_paused_player_stops_with_its_device_but_resumes_only_if_its_backend_reports_resumes(
     fast_polls,
 ):
-    music_assistant = Renderer(reports_external_resume=True)
-    dlna = Renderer(reports_external_resume=False)
+    music_assistant = MusicAssistantRenderer()
+    dlna = Renderer()
     async with _paused_player(music_assistant) as followed, _paused_player(dlna) as ignored:
         music_assistant.state = PlaybackState.PLAYING  # resumed in Music Assistant's own UI
         dlna.state = PlaybackState.PLAYING  # a renderer that still reports a stale state
@@ -227,10 +233,16 @@ async def _add_on(config: Config) -> AsyncIterator[tuple[QobuzProxy, aiohttp.Cli
 
 
 class _QobuzAcceptingTheSavedLogin:
-    def __init__(self, app_id: str, app_secret: str) -> None: ...
+    def __init__(self, app_id: str, app_secret: str) -> None:
+        self.user_auth_token = ""
 
     async def login_with_token(self, user_id: str, auth_token: str) -> bool:
+        self.user_auth_token = auth_token
         return True
+
+
+async def _qobuz_sign_in_with_a_new_token(code: str, **_: object) -> dict[str, str]:
+    return {"user_id": "1", "user_auth_token": "new"}
 
 
 @pytest.fixture
@@ -250,6 +262,7 @@ def config_from_an_earlier_run(
     )
     monkeypatch.setattr(speakers_module, "UPDATE_DELAY_SECONDS", 0.01)
     monkeypatch.setattr("qobuz_proxy.app.QobuzAPIClient", _QobuzAcceptingTheSavedLogin)
+    monkeypatch.setattr("qobuz_proxy.webui.routes.exchange_code", _qobuz_sign_in_with_a_new_token)
     # A logout clears the saved Qobuz login: keep the developer's own out of reach
     monkeypatch.setattr("qobuz_proxy.auth.credentials.CACHE_FILE", tmp_path / "credentials.json")
     monkeypatch.setattr(speaker_module, "DiscoveryService", StubDiscovery)
@@ -265,12 +278,23 @@ async def _speakers_in_the_qobuz_app(web_ui: aiohttp.ClientSession) -> int:
     return (await response.json())["speaker_count"]
 
 
+def _qobuz_logins_the_speakers_use(proxy: QobuzProxy) -> list[str]:
+    speakers = proxy._music_assistant._speakers.values()
+    return [speaker._api_client.user_auth_token for speaker in speakers]
+
+
 async def test_music_assistant_players_are_in_the_qobuz_app_only_while_the_add_on_runs_logged_in(
     server, config_from_an_earlier_run
 ):
-    async with _add_on(config_from_an_earlier_run) as (_, web_ui):
+    async with _add_on(config_from_an_earlier_run) as (proxy, web_ui):
         await wait_for(lambda: _speakers_in_the_qobuz_app(web_ui), "the Kitchen speaker")
         assert await _speakers_in_the_qobuz_app(web_ui) == 1
+        assert _qobuz_logins_the_speakers_use(proxy) == ["saved"]
+
+        # Logging in again, e.g. to another account, moves the running speaker to the new login
+        signed_in = await web_ui.get("/auth/callback?code_autorisation=1", allow_redirects=False)
+        assert signed_in.headers["Location"] == "/"  # back to the web UI, no error
+        assert _qobuz_logins_the_speakers_use(proxy) == ["new"]
 
         assert (await web_ui.post("/api/auth/logout", json={})).status == 200
         assert await _speakers_in_the_qobuz_app(web_ui) == 0
