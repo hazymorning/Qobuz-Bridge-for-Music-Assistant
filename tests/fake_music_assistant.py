@@ -608,6 +608,7 @@ class FakeMusicAssistantServer:
             "player_queues/delete_item": self._cmd_delete_item,
             "player_queues/repeat": self._cmd_repeat,
             "player_queues/autoplay": self._cmd_autoplay,
+            "auth/me": lambda sock: self._user(sock.username),
             "auth/token/create": self._cmd_token_create,
             "auth/logout": self._cmd_logout,
         }

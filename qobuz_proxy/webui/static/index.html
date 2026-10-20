@@ -49,16 +49,28 @@
             <label for="music-assistant-url">Address</label>
             <input id="music-assistant-url" type="text" inputmode="url" autocomplete="off" autocapitalize="off"
                    spellcheck="false">
-            <label for="music-assistant-username">Music Assistant username</label>
-            <input id="music-assistant-username" type="text" autocomplete="username" autocapitalize="off"
-                   spellcheck="false">
-            <label for="music-assistant-password">Password</label>
-            <input id="music-assistant-password" type="password" autocomplete="current-password">
+            <div id="music-assistant-password-login">
+                <label for="music-assistant-username">Music Assistant username</label>
+                <input id="music-assistant-username" type="text" autocomplete="username" autocapitalize="off"
+                       spellcheck="false">
+                <label for="music-assistant-password">Password</label>
+                <input id="music-assistant-password" type="password" autocomplete="current-password">
+                <p class="note">Your Music Assistant login, not your Qobuz or Home Assistant password.
+                    No Music Assistant password (you only open it from the Home Assistant sidebar)?
+                    Use a token instead.</p>
+            </div>
+            <div id="music-assistant-token-login" hidden>
+                <label for="music-assistant-token">Token</label>
+                <input id="music-assistant-token" type="password" autocomplete="off" autocapitalize="off"
+                       spellcheck="false">
+                <p class="note">In Music Assistant, open your user profile, create a long-lived token
+                    and paste it here.</p>
+            </div>
+            <button type="button" id="music-assistant-login-switch" class="link-button">
+                Use a token instead
+            </button>
             <p id="music-assistant-error" class="error-message" role="alert" hidden></p>
             <button type="submit" id="music-assistant-connect">Connect</button>
-            <p class="note">This is your Music Assistant login, not your Qobuz or Home Assistant
-                password. If you only ever open Music Assistant from the Home Assistant sidebar, set a
-                password for your user in Music Assistant first (your user profile).</p>
         </form>
     </section>
 
