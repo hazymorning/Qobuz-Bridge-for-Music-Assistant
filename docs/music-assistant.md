@@ -5,8 +5,9 @@ Checks, tests, merging upstream and releases: [CONTRIBUTING.md](../CONTRIBUTING.
 
 ## The idea
 
-Every exposed Music Assistant (MA) player or group gets its own upstream `Speaker`: its own mDNS
-record, discovery port and Qobuz websocket, exactly like a DLNA speaker. Only the backend differs:
+Every exposed Music Assistant (MA) player or group, and every party speaker, gets its own
+upstream `Speaker`: its own mDNS record, discovery port and Qobuz websocket, exactly like a DLNA
+speaker. Only the backend differs:
 `MusicAssistantBackend` asks MA to play `qobuz://track/<id>` on the player's MA queue (queue id ==
 player id), and MA streams it with its own Qobuz provider.
 
@@ -25,10 +26,12 @@ is asked.
 
 | File | Role |
 |---|---|
-| `qobuz_proxy/backends/music_assistant/connection.py` | One websocket to MA for all players. Builds a new `MusicAssistantClient` per attempt (the client is single-use), reconnects with capped backoff, stops when MA rejects the token, maps errors, times out every call, hands events to listeners by player id. Also the logins: username/password → a long-lived token of our own, or a check of a token made in MA. |
+| `qobuz_proxy/backends/music_assistant/connection.py` | One websocket to MA for all players. Builds a new `MusicAssistantClient` per attempt (the client is single-use), reconnects with capped backoff, stops when MA rejects the token, maps errors, times out every call, hands events to listeners by player id, remembers which backend continued a queue item last. Also the logins: username/password → a long-lived token of our own, or a check of a token made in MA. |
 | `qobuz_proxy/backends/music_assistant/backend.py` | `MusicAssistantBackend`: one MA player or group. |
-| `qobuz_proxy/backends/music_assistant/speakers.py` | `MusicAssistantSpeakers`: owns the connection, decides which players to expose, starts and stops their speakers, stable UUIDs (`uuid5(namespace, "music_assistant:<player_id>")`) and ports (8700+, remembered). |
-| `qobuz_proxy/backends/music_assistant/settings.py` | `music_assistant.json` in the data dir (mode 0600): address, token, username, exposure choices, known players and their ports, and the MA queue items each backend created. |
+| `qobuz_proxy/backends/music_assistant/party.py` | `Party` (gathers and releases a party speaker's members) and `PartyBackend` (the backend hook). See [Party speakers](#party-speakers). |
+| `qobuz_proxy/backends/music_assistant/home_assistant.py` | `HomeAssistant`: a small client for Home Assistant's media players, for parties grouped there. |
+| `qobuz_proxy/backends/music_assistant/speakers.py` | `MusicAssistantSpeakers`: owns the connection, decides which players to expose, starts and stops their speakers and the party speakers, stable UUIDs (`uuid5(namespace, "music_assistant:<player_id>")`, `"music_assistant:party:<party_id>"` for a party speaker) and ports (8700+, remembered). Adds, changes and removes party speakers for the panel. |
+| `qobuz_proxy/backends/music_assistant/settings.py` | `music_assistant.json` in the data dir (mode 0600): address, token, username, exposure choices, known players and their ports, the speakers' own names, the party speakers, and the MA queue items each backend created. |
 | `qobuz_proxy/webui/music_assistant_routes.py`, `qobuz_proxy/webui/static/index.html`, `qobuz_proxy/webui/static/panel.js`, `qobuz_proxy/webui/static/panel.css` | The panel and its API. |
 | `rootfs/start.py` | Add-on entry point: applies the options, turns on the sidebar panel and watchdog once, makes `/data` private, drops to an unprivileged user, runs the app. |
 
@@ -43,7 +46,7 @@ merge loses one. How to resolve conflicts: [CONTRIBUTING.md](../CONTRIBUTING.md#
 | File | Hooks |
 |---|---|
 | `qobuz_proxy/app.py` | Builds, starts and stops `MusicAssistantSpeakers`; calls `set_qobuz_logged_in` on Qobuz login and logout; `_make_music_assistant_speaker`; `web_app["music_assistant"]` for the panel; `_check_speaker` (the web UI refuses a speaker the next start would reject). |
-| `qobuz_proxy/speaker.py` | `Speaker(..., backend=)`; the `backend_type == "music_assistant"` checks (no play reports, no track reload on a quality change); volume dispatch (`_dispatch_volume`: a volume broadcast reaches only the active speaker) and device-volume reporting (`_on_device_volume_change`); `ExternalPlaybackAware` instead of the DLNA-only checks. |
+| `qobuz_proxy/speaker.py` | `Speaker(..., backend=)`; the `backend_type == "music_assistant"` checks (no play reports, no track reload on a quality change); volume dispatch (`_dispatch_volume`: a volume broadcast reaches only the active speaker) and device-volume reporting (`_on_device_volume_change`); `ExternalPlaybackAware` instead of the DLNA-only checks; playback dispatch (`_dispatch_playback`: after the stop for `SrvrRndrSetActive(active=false)` it calls the backend's `app_left()`, if it has one, unless the speaker was picked again). |
 | `qobuz_proxy/playback/player.py` | Follows a resume made on the device (`_follow_external_resume`); skips a track the backend cannot play (`TrackUnavailableError`). |
 | `qobuz_proxy/backends/base.py` | `TrackUnavailableError`, `reports_external_resume`, `on_volume_change` and the `ExternalPlaybackAware` protocol. |
 | `qobuz_proxy/backends/types.py` | `start_position_ms` in `BackendTrackMetadata`. |
@@ -63,6 +66,10 @@ Keep these when changing the backend:
   never a track end.
 - Anything else on the queue while attached is external playback: the backend releases the Qobuz
   session (`ExternalPlaybackAware`) and sends MA nothing until `prepare_for_selection()`.
+- A party speaker shares its main player's queue with that player's own speaker (and with other
+  party speakers on it). When one backend continues an item another one played (`_adopt`, e.g.
+  the app moves from the party speaker to the main player's speaker), it records that with
+  `continue_item`; the other one's late stop, pause or seek then leaves the item alone.
 
 ## Qobuz app → MA
 
@@ -97,6 +104,49 @@ or resume in MA only changes what `get_state()` returns: the app sees it when th
 polls `get_state()` every 0.5 s (`qobuz_proxy/playback/player.py`). Each poll also runs
 `_check_queue`, so a decision still waiting when MA goes quiet is made anyway. `pause()`,
 `resume()`, `seek()` and `stop()` are the other direction.
+
+## Party speakers
+
+A party speaker (`PartySpeaker` in the settings, by an 8-hex-digit party id) is a speaker of its
+own whose music plays on a main player's MA queue while other speakers join that player. Its
+speaker key is `party:<party_id>` (UUID, session and port as for players). It is wanted while its
+main player is known, whatever the exposure choices. A change restarts it once it is not playing
+(`_party_changed`, like a rename); a removed one stops at once, music and group left as they are
+(apart from a release that was waiting, see `close()`).
+
+The hook is in the backend. `PartyBackend` is a `MusicAssistantBackend` on the main player, so
+everything above holds unchanged; it only adds:
+
+| `PartyBackend` | `Party` |
+|---|---|
+| `play()` | `gather()` first (skipped while MA is unreachable or external playback holds the player), then the normal play. A grouping problem never fails the play; one that does not answer delays it (10 s per call at most). |
+| `_notify_state_change(STOPPED)` | `on_state()`: with `after_party="split"`, a release after `PARTY_RELEASE_DELAY_SECONDS` (5 s). A play in between cancels it, as a track change is a stop and a play; a pause never starts one. STOPPED covers a stop in the app or in MA, the end of the queue, MA unreachable and external playback; a play that fails calls it too. |
+| `app_left()` (the `speaker.py` hook) | `leave()`: cancels a waiting release; with `on_leave="split"`, a release at once. |
+| `disconnect()` | `close()`: a release that was waiting happens now. |
+
+`Party` gathers and releases under one lock. A gather groups the members that are not with the
+main player yet (none while the main player is unavailable; with `busy_speakers="skip"`, not
+those playing something else) and records exactly the ones it added; a release removes only
+those. What fails is logged and kept as `problem`, which the panel shows; the next gather
+replaces it. The state is in memory only: after an add-on restart nothing gathered before is
+released.
+
+| `grouping` | Gather | Release | Members |
+|---|---|---|---|
+| `music_assistant` | `players/cmd/set_members` with `player_ids_to_add` on the main player | the same with `player_ids_to_remove` | MA player ids; must be in the main player's `can_group_with` when MA reports it. With the main = in its `group_members` or `synced_to` it. |
+| `home_assistant` | `media_player.join` (`entity_id` = `main_entity_id`, `group_members`) | `media_player.unjoin` per member, all at once | Home Assistant `media_player.*` ids. With the main = in the main entity's `group_members`. |
+
+Home Assistant grouping uses the speakers' own multiroom; MA still plays only to the main
+player. `HomeAssistant` reaches Home Assistant Core through the Supervisor
+(`http://supervisor/core/api`, `Bearer $SUPERVISOR_TOKEN`, allowed by `"homeassistant_api": true`
+in `config.json`): `GET /states` for the media players (`can_group` from `supported_features`),
+`POST /services/media_player/join` and `/unjoin`. Every call times out after 10 s, every failure
+becomes a `HomeAssistantError` with a plain message, and the token is never logged. Without a
+token (outside Home Assistant) it is unavailable and the panel says so.
+
+Known limit: two party speakers on the same main player with shared members can race when the
+app switches straight from one to the other. A release of the first can remove a member the
+second's gather found already grouped and so did not record.
 
 ## Tests
 

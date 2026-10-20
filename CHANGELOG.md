@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+- Party speakers: a speaker in the Qobuz app that plays on one main speaker and brings other
+  speakers into its group while the party plays. Add one under **4. Party speakers** in the
+  panel. Music Assistant or Home Assistant groups the speakers, and you choose what happens to
+  speakers already playing something else, when the music stops and when you switch to another
+  device in the Qobuz app.
+- The add-on now has access to Home Assistant. It uses it only for party speakers grouped by
+  Home Assistant: to list your media players and to group and ungroup them.
+
 ## 0.3.0
 
 - Give any speaker your own name: **Rename** under a player in the panel. Clear the name to get

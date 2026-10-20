@@ -1,6 +1,6 @@
 {
   "name": "MA Qobuz Bridge",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "slug": "qobuz_bridge",
   "description": "Your Music Assistant players and groups as speakers in the Qobuz app",
   "url": "https://github.com/hazymorning/ma-qobuz-bridge",
