@@ -76,12 +76,12 @@ Keep these when changing the backend:
 | Qobuz app | Music Assistant |
 |---|---|
 | play | `player_queues/play_media` `replace` (a start mid-track: `clear` + `add` + `play_index(seek_position)`) |
-| play of the track MA already plays or has paused (e.g. after an add-on restart) | continued where it is (`play` if paused), not started again |
+| play of the track MA already plays or has paused (e.g. after an add-on restart) | continued where it is (`seek` to its spot if paused), not added again |
 | next track known | `play_media` `replace_next` once MA really plays the current track (gapless) |
 | next (already queued) | `play_index` on the queued item |
-| pause / resume / stop / seek | `pause` / `play` / `stop` / `seek` (stop only while MA still plays our item) |
-| resume, and the player stays paused (a WiiM) | `seek` to where it paused, which starts MA's stream again; from then on every resume on that speaker does this right away |
-| seek while paused | nothing yet (MA would start playing to seek); resume then does a `seek` to that spot |
+| pause / stop / seek | `pause` / `stop` / `seek` (only while MA still plays our item) |
+| resume | `seek` to where the track paused: MA starts its stream again there. Not MA's unpause (`play`), which leaves it to the player to carry on with the stream it paused; a WiiM does not, and MA does not notice. After 30 s paused MA restarts the stream this way itself. |
+| seek while paused | nothing yet (a seek in MA always plays); resume starts the track at the new spot |
 | volume | `players/cmd/group_volume` (MA applies it as a plain volume set on a single player) |
 | next track changed | `delete_item`; an item the player already buffered is marked stale and stepped past |
 | first play after a selection | repeat and autoplay turned off on that queue |
@@ -102,7 +102,8 @@ MA events reach `_on_event`, which runs `_check_queue` and, for our current item
 `_check_our_item`. What the QobuzPlayer must act on is pushed through the `AudioBackend`
 callbacks: track ends (`_report_ended`), next tracks (`_promote_armed`), stops
 (`_report_interrupted`), seeks (`_update_position`) and volume (`_report_device_volume`). A pause
-or resume in MA only changes what `get_state()` returns: the app sees it when the QobuzPlayer
+in the app or in MA is kept in `_paused_at_ms`: where the track plays again. A pause or resume in
+MA changes what `get_state()` returns, and the app sees it when the QobuzPlayer
 polls `get_state()` every 0.5 s (`qobuz_proxy/playback/player.py`). Each poll also runs
 `_check_queue`, so a decision still waiting when MA goes quiet is made anyway. `pause()`,
 `resume()`, `seek()` and `stop()` are the other direction.

@@ -326,3 +326,27 @@ async def test_the_home_assistant_client_sends_the_token_and_turns_failures_into
     monkeypatch.delenv("SUPERVISOR_TOKEN")
     with pytest.raises(HomeAssistantError, match="runs in Home Assistant"):
         await HomeAssistant().join("media_player.kitchen", ["media_player.hedwig"])
+
+
+async def test_a_paused_main_speaker_handed_to_its_party_speaker_plays_on_where_it_paused(
+    server, start_speaker
+):
+    server.no_unpause_player_ids.add(KITCHEN)
+    kitchen = await start_speaker()
+    await kitchen.play_album(0)
+    server.advance_time(KITCHEN, 40)
+    await kitchen.deliver(album_state(0, APP_PAUSED, pos=40_000))
+    await kitchen.wait_for(lambda: kitchen.queue_state() == MusicAssistantState.PAUSED, "paused")
+    rig = await start_speaker(
+        party=party(on_leave="keep"), name="Party", connection=kitchen.connection
+    )
+
+    # Play on the party speaker reaches the add-on before Kitchen hears it was left
+    await rig.deliver(album_state(0, APP_PLAYING, pos=40_000))
+    await kitchen.deliver(set_active(False))
+    await rig.idle(0.6)
+
+    assert (rig.app(), rig.queue_state()) == ((APP_PLAYING, 1), MusicAssistantState.PLAYING)
+    assert rig.queue_position() == pytest.approx(40, abs=1)
+    assert grouped(server) == [HEDWIG, BATH]
+    assert "player_queues/stop" not in kitchen.writes()

@@ -101,7 +101,7 @@ async def test_pause_and_resume_in_the_app_pause_music_assistant_and_resume_it_w
     await rig.deliver(album_state(0, APP_PLAYING, pos=30_500))
     await rig.wait_for(lambda: rig.app() == (APP_PLAYING, 1), "app shows playing")
 
-    assert rig.writes() == ["player_queues/pause", "player_queues/play"]
+    assert rig.writes() == ["player_queues/pause", "player_queues/seek"]
     assert rig.queue_state() == MusicAssistantState.PLAYING
     assert rig.queue_position() == pytest.approx(30, abs=1)
 
@@ -160,31 +160,73 @@ async def test_a_seek_while_paused_stays_paused_and_play_starts_the_track_there(
     assert rig.queue_position() == pytest.approx(90, abs=1)
 
 
-async def test_a_speaker_that_stays_paused_when_unpaused_plays_again_from_where_it_paused(rig):
+@pytest.mark.parametrize(
+    "stays_paused_when_unpaused", [False, True], ids=["any-speaker", "speaker-like-a-wiim"]
+)
+async def test_play_after_a_pause_starts_the_track_again_where_it_paused_on_every_speaker(
+    rig, stays_paused_when_unpaused
+):
+    if stays_paused_when_unpaused:
+        rig.server.no_unpause_player_ids.add(KITCHEN)
+    await rig.play_album(0)
+    await rig.wait_armed("102")
+    for paused_at in (30, 40):
+        rig.server.advance_time(KITCHEN, paused_at - rig.queue_position())
+        await rig.deliver(album_state(0, APP_PAUSED, pos=paused_at * 1000))
+        await rig.wait_for(lambda: rig.queue_state() == MusicAssistantState.PAUSED, "paused")
+        rig.server.clear_logs()
+
+        await rig.deliver(album_state(0, APP_PLAYING, pos=paused_at * 1000))
+        await rig.wait_for(lambda: rig.app() == (APP_PLAYING, 1), "app shows playing")
+        await rig.idle(0.6)  # longer than the backend waits for Music Assistant to confirm
+
+        assert rig.app() == (APP_PLAYING, 1)
+        assert rig.writes() == ["player_queues/seek"]  # one stream start, where it paused
+        assert rig.queue_state() == MusicAssistantState.PLAYING
+        assert rig.queue_position() == pytest.approx(paused_at, abs=1)
+
+
+async def test_play_in_the_app_after_a_pause_in_music_assistant_starts_the_track_where_it_paused(
+    rig,
+):
     rig.server.no_unpause_player_ids.add(KITCHEN)
     await rig.play_album(0)
     await rig.wait_armed("102")
     rig.server.advance_time(KITCHEN, 30)
-    await rig.deliver(album_state(0, APP_PAUSED, pos=30_000))
-    await rig.wait_for(lambda: rig.queue_state() == MusicAssistantState.PAUSED, "paused")
+    await rig.idle(0.6)  # the player reads the position every 0.5 s
+    rig.server.ui_pause(KITCHEN)
+    await rig.wait_for(lambda: rig.app() == (APP_PAUSED, 1), "app shows paused")
+    paused_at = rig.queue_position()
     rig.server.clear_logs()
 
-    await rig.deliver(album_state(0, APP_PLAYING, pos=30_000))
+    await rig.deliver(album_state(0, APP_PLAYING, pos=rig.app_position()))
     await rig.wait_for(lambda: rig.app() == (APP_PLAYING, 1), "app shows playing")
-    assert rig.writes() == ["player_queues/play", "player_queues/seek"]
-    assert rig.queue_state() == MusicAssistantState.PLAYING
-    assert rig.queue_position() == pytest.approx(30, abs=1)
+    assert rig.queue_position() == pytest.approx(paused_at, abs=1)
+    await rig.idle(0.6)
 
-    # From then on a resume starts the track again straight away
-    rig.server.advance_time(KITCHEN, 10)
-    await rig.deliver(album_state(0, APP_PAUSED, pos=40_000))
-    await rig.wait_for(lambda: rig.queue_state() == MusicAssistantState.PAUSED, "paused again")
-    rig.server.clear_logs()
-    await rig.deliver(album_state(0, APP_PLAYING, pos=40_000))
-    await rig.wait_for(lambda: rig.app() == (APP_PLAYING, 1), "app shows playing again")
+    assert rig.app() == (APP_PLAYING, 1)
     assert rig.writes() == ["player_queues/seek"]
-    assert rig.queue_state() == MusicAssistantState.PLAYING
-    assert rig.queue_position() == pytest.approx(40, abs=1)
+
+
+async def test_play_after_the_queue_ended_while_paused_starts_the_track_where_it_paused(rig):
+    await rig.play_album(2)
+    await rig.play_to_near_end(4)
+    await rig.deliver(album_state(2, APP_PAUSED, pos=int(rig.queue_position() * 1000)))
+    await rig.wait_for(lambda: rig.queue_state() == MusicAssistantState.PAUSED, "paused")
+    paused_at = rig.queue_position()
+    rig.server.auto_stop_after_pause(KITCHEN)
+    await rig.server.settle()
+    assert rig.server.mark_ended(KITCHEN)  # the last track, so near its end the queue ends
+    await rig.idle(0.6)
+    assert rig.app() == (APP_PAUSED, 3)
+    rig.server.clear_logs()
+
+    await rig.deliver(album_state(2, APP_PLAYING, pos=rig.app_position()))
+    await rig.wait_for(lambda: rig.app() == (APP_PLAYING, 3), "app shows playing")
+
+    assert rig.writes() == ["player_queues/seek"]  # not Music Assistant's queue from the start
+    assert rig.queue_track() == "103"
+    assert rig.queue_position() == pytest.approx(paused_at, abs=1)
 
 
 async def test_volume_from_the_app_reaches_music_assistant_and_the_latest_of_a_burst_wins(
@@ -413,7 +455,7 @@ async def test_two_qobuz_apps_on_the_same_speaker_both_control_it_without_restar
 
     assert rig.writes() == [
         "player_queues/pause",
-        "player_queues/play",
+        "player_queues/seek",
         "player_queues/play_index",
         "player_queues/play_media",
     ]

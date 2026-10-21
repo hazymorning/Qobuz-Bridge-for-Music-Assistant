@@ -83,22 +83,28 @@ async def test_an_outage_longer_than_the_grace_shows_stopped_and_play_works_once
     assert_no_backend_errors(caplog)
 
 
-async def test_paused_music_stays_paused_through_an_outage(server, rig):
+@pytest.mark.parametrize("paused_in", ["app", "music-assistant"])
+async def test_paused_music_stays_paused_through_an_outage(server, rig, paused_in):
     await rig.play_album(0)
     server.advance_time(KITCHEN, 30)
-    await rig.deliver(album_state(0, APP_PAUSED, pos=30_000))
-    await rig.wait_for(lambda: rig.queue_state() == MusicAssistantState.PAUSED, "paused")
+    if paused_in == "app":
+        await rig.deliver(album_state(0, APP_PAUSED, pos=30_000))
+    else:
+        server.ui_pause(KITCHEN)
+    await rig.wait_for(lambda: rig.app() == (APP_PAUSED, 1), "app shows paused")
+    paused = len(rig.cloud.reports)
 
     server.set_reachable(False, drop=True)
     await rig.idle(2.0)  # longer than the grace and the player's three 0.5 s checks for a stop
     assert rig.app() == (APP_PAUSED, 1)
+    assert rig.shown_states(since=paused) <= {APP_PAUSED}
 
     server.set_reachable(True)
     await rig.wait_for(lambda: rig.connection.is_connected, "reconnected")
     server.clear_logs()
     await rig.deliver(album_state(0, APP_PLAYING, pos=30_000))
     await rig.wait_for(lambda: rig.app() == (APP_PLAYING, 1), "app shows playing")
-    assert rig.writes() == ["player_queues/play"]  # resumed, not started again
+    assert rig.writes() == ["player_queues/seek"]  # where it paused, not from the start
     assert rig.queue_position() == pytest.approx(30, abs=1)
 
 
@@ -192,9 +198,14 @@ async def test_after_an_add_on_restart_play_in_the_app_continues_what_music_assi
     assert restarted.plays() == [("replace", [uri("101")])]  # not continued
 
 
+@pytest.mark.parametrize(
+    "stays_paused_when_unpaused", [False, True], ids=["any-speaker", "speaker-like-a-wiim"]
+)
 async def test_after_an_add_on_restart_play_resumes_the_track_paused_in_music_assistant(
-    server, rig, restart_add_on
+    server, rig, restart_add_on, stays_paused_when_unpaused
 ):
+    if stays_paused_when_unpaused:
+        server.no_unpause_player_ids.add(KITCHEN)
     await rig.play_album(0)
     server.advance_time(KITCHEN, 30)
     server.ui_pause(KITCHEN)
@@ -204,7 +215,7 @@ async def test_after_an_add_on_restart_play_resumes_the_track_paused_in_music_as
     await restarted.deliver(album_state(0, APP_PLAYING, pos=30_000))
     await restarted.wait_for(lambda: restarted.app() == (APP_PLAYING, 1), "app shows playing")
 
-    assert restarted.writes() == ["player_queues/play"]
+    assert restarted.writes() == ["player_queues/seek"]
     assert restarted.queue_state() == MusicAssistantState.PLAYING
     assert restarted.queue_position() == pytest.approx(30, abs=1)
 
