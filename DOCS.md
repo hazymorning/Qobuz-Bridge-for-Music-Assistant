@@ -89,7 +89,9 @@ To add a party speaker, tap **Add a party speaker** under **4. Party speakers**:
 - **Name in the Qobuz app:** used exactly as you type it (up to 40 characters, no "(MA)" added).
 - **Main speaker (plays the music):** the Music Assistant player the music plays on; the others
   join it. The party speaker shows up in the Qobuz app whether or not this player is ticked under
-  **Speakers in the Qobuz app**.
+  **Speakers in the Qobuz app**, so a speaker with Qobuz Connect built in (left unticked so it
+  does not show up twice) can still lead a party. Pick the speaker your speakers' multiroom needs
+  as the leader: with mixed LinkPlay or WiiM models, usually the newest one.
 - **Group with:** **Music Assistant** or **Home Assistant**:
   - **Music Assistant** syncs the speakers itself. Pick it when Music Assistant can sync them
     with the main speaker, usually players of the same kind in Music Assistant. Speakers it

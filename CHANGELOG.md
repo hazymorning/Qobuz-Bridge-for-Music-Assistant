@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.1
+
+- Play after a pause works on every speaker, WiiM speakers included (they stayed silent). Play
+  now starts the track again where it paused, as Music Assistant does itself after a pause longer
+  than 30 seconds. On speakers that could already unpause, the sound may come back a moment later
+  than before.
+- A seek while paused no longer starts the music by itself. The speaker stays paused, and play
+  starts the track at the new spot.
+- After an add-on restart, play on a track paused in Music Assistant works on WiiM speakers too,
+  and so does moving a paused track between a speaker and its party speaker.
+- A pause made in Music Assistant now stays paused in the Qobuz app while Music Assistant is
+  unreachable (it showed playing, then stopped).
+
 ## 0.4.0
 
 - Party speakers: a speaker in the Qobuz app that plays on one main speaker and brings other

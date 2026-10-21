@@ -120,7 +120,8 @@ class FakeMusicAssistantServer:
     Test inputs: ``fail_next[command]`` (one shot: an exception to answer with, ``DROP`` or
     ``HANG``), ``unplayable_track_ids`` (resolve as unavailable, so play_media leaves them out),
     ``library_track_ids`` (come back as library items with the Qobuz id only in the provider
-    mapping), ``dead_player_ids`` (speakers that never start playing).
+    mapping), ``dead_player_ids`` (speakers that never start playing), ``no_unpause_player_ids``
+    (speakers that stay paused when Music Assistant unpauses them, as a WiiM does).
     Logs: ``command_log`` (``(command, args)`` of every command but ``auth``; args are JSON, and
     enums equal their ``StrEnum`` members), ``created_clients`` and ``issued_tokens`` (every
     token it handed out).
@@ -144,6 +145,7 @@ class FakeMusicAssistantServer:
         self.unplayable_track_ids: set[str] = set()
         self.library_track_ids: set[str] = set()
         self.dead_player_ids: set[str] = set()
+        self.no_unpause_player_ids: set[str] = set()
 
         self.fail_next: dict[str, Any] = {}
         self.command_log: list[tuple[str, dict[str, Any]]] = []
@@ -1091,12 +1093,14 @@ class FakeMusicAssistantServer:
         self._transitioning[queue_id] = False
 
     def _play(self, queue_id: str) -> None:
-        """MA's ``play``: unpause a paused queue, else resume it."""
+        """MA's ``play``: unpause a paused queue (MA waits 5 s for that, then gives up
+        silently), else resume it."""
         queue = self._queue(queue_id)
         with self._play_action(queue_id):
             self._require_available(queue_id)
             if queue.active and queue.state == PlaybackState.PAUSED:
-                self._device_set_state(queue_id, PlaybackState.PLAYING)
+                if queue_id not in self.no_unpause_player_ids:
+                    self._device_set_state(queue_id, PlaybackState.PLAYING)
             else:
                 self._resume(queue_id)
 

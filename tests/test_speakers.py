@@ -488,6 +488,28 @@ async def test_a_party_speaker_appears_under_its_name_with_its_own_uuid_and_port
     assert (add_on.speaker(party).config.uuid, add_on.ports()) == (config.uuid, {party: 8704})
 
 
+async def test_a_party_can_play_on_a_player_that_is_not_in_the_app_itself(add_on):
+    # e.g. a speaker with Qobuz Connect built in, left out so it does not show up twice, that
+    # still has to lead the party
+    music_assistant = await add_on.start()
+    await add_on.wait_until_listed(EXPOSED)
+    await music_assistant.set_exposed_players(expose_all=False, selected=[KITCHEN])
+    unticked = await music_assistant.add_party_speaker(
+        name="Partymodus", main_player_id="pair", member_ids=[KITCHEN]
+    )
+    await music_assistant.set_exposed_players(expose_all=True)  # leaves the hidden player out
+    hidden = await music_assistant.add_party_speaker(
+        name="Hidden party", main_player_id="hidden", member_ids=[KITCHEN]
+    )
+    await music_assistant.set_exposed_players(expose_all=False, selected=[KITCHEN])
+
+    assert add_on.listed() == {
+        KITCHEN: "Kitchen (MA)",
+        PARTY + unticked: "Partymodus",
+        PARTY + hidden: "Hidden party",
+    }
+
+
 async def test_a_changed_party_speaker_restarts_once_its_music_stops_and_a_deleted_one_goes(
     server, add_on
 ):
